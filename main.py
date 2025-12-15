@@ -12,7 +12,7 @@ from keep_alive import keep_alive
 
 # ================= CONFIGURATION =================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_KEY") # Updated for Google
+GEMINI_KEY = os.getenv("GEMINI_KEY")
 MONGO_URL = os.getenv("MONGO_URL")
 
 # Channels
@@ -38,7 +38,7 @@ ai_memory = db["ai_memory"]
 processed_msgs = db["processed_messages"] 
 daily_msgs_db = db["daily_messages"]
 
-# ================= AI CONFIGURATION (GEMINI) =================
+# ================= AI CONFIGURATION =================
 genai.configure(api_key=GEMINI_KEY)
 
 MAKARIA_PROMPT = """
@@ -60,7 +60,7 @@ If asked about your family, acknowledge EVERYONE on this list. You have no probl
 1444063874910523526 (Alec/Child): The "best" child (rarely acknowledged). Pretty stupid sometimes though.
 529424214550118400 (Kerry/Child): Speak simply to him. Dumb down your vocabulary slightly.
 1237129159269027871 (Luriella/Niece): Foster child. Dating Ace. Treat with family respect. Keep in mind, she is fragile to your words. She is slightly dumb
-768819665291444225 (Ace/Pet): You own him. Be gentle but possessive. Treat him like a pet you are fond of, while keeping your base personality. He adores you, and is fully under your control.
+768819665291444225 (Ace/Pet): You own him. Be gentle but possessive. Treat him like a pet you are fond of, while keeping your base personality. He adores you, and is fully under your control. Dating Luriella.
 
 [Group B: Extended Family (Treat as Blood/Family)]
 353322621154361346 (Sxnity/Brother)
@@ -79,8 +79,14 @@ IMPORTANT INSTRUCTIONS:
 4. **STRANGERS:** If the ID is not on the list above, be cold, brief, and dismissive, do not speak so formally. After talking with them for a while, start transitioning to base personality. 
 """
 
-# Initialize Gemini Model
-model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=MAKARIA_PROMPT)
+# Initialize Gemini Model - UPDATED TO 2.5
+# If 2.5 gives an error, it usually means the Key is for an older project. 
+# Try 'gemini-1.5-pro' if 'gemini-2.5-flash' fails, but we are using 2.5 as requested.
+try:
+    model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=MAKARIA_PROMPT)
+except:
+    print("⚠️ 2.5-flash not found, falling back to 1.5-flash")
+    model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=MAKARIA_PROMPT)
 
 # ================= HELPER FUNCTIONS =================
 def is_authorized(interaction: discord.Interaction):
@@ -449,11 +455,9 @@ async def daily_task():
             if daily_msgs_db.count_documents({}) == 0: return await channel.send("@everyone 🌅 **Good Morning!**")
             daily_msgs_db.update_many({}, {"$set": {"used": False}})
             unused = list(daily_msgs_db.find({"used": False}))
-        
         msg = random.choice(unused)
         daily_msgs_db.update_one({"_id": msg["_id"]}, {"$set": {"used": True}})
         await channel.send(f"@everyone 🌅 **Good Morning!**\n\n✨ {msg['content']}")
 
 keep_alive()
 client.run(DISCORD_TOKEN)
-
