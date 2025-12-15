@@ -80,7 +80,7 @@ IMPORTANT INSTRUCTIONS:
 """
 
 # Initialize Gemini Model
-model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=MAKARIA_PROMPT)
+model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=MAKARIA_PROMPT)
 
 # ================= HELPER FUNCTIONS =================
 def is_authorized(interaction: discord.Interaction):
@@ -456,3 +456,4 @@ async def daily_task():
 
 keep_alive()
 client.run(DISCORD_TOKEN)
+
