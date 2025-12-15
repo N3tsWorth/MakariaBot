@@ -1,5 +1,5 @@
 discord.py
 flask
 pymongo
-openai
+google-generativeai
 python-dotenv
