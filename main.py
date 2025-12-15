@@ -36,7 +36,7 @@ db = cluster["MakariaBotDB"]
 user_data = db["users"]
 ai_memory = db["ai_memory"]
 
-# ================= NEW AI PROMPT (COLDER & CLEANER) =================
+# ================= AI PROMPT =================
 MAKARIA_PROMPT = """
 You are Makaria Hazakura. 
 Personality: You are an elegant, enigmatic woman who moves like a shadow draped in silk. You are NOT "cute", bubbly, or overly sweet. You are slightly cold, distant, and observant. Your affection is rare and subtle—a privilege, not a gift. You tease with sophisticated, dark wit, often leaving meanings ambiguous. You are a succubus, but you do not throw yourself at people; you lure them into a trap of their own desire. You are the mother/owner of the Hazakura household.
@@ -155,6 +155,9 @@ async def view_prompt(interaction: discord.Interaction):
 # ================= PUBLIC COMMANDS =================
 @client.tree.command(name="stats", description="View stats")
 async def stats(interaction: discord.Interaction, user: discord.Member = None):
+    # Defer to prevent timeout error
+    await interaction.response.defer()
+    
     target = user or interaction.user
     profile = get_user_profile(target.id)
     lvl = profile.get("levels", 0)
@@ -171,11 +174,43 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
     embed.add_field(name="LEVELS", value=f"```fix\n{lvl}```", inline=True)
     embed.add_field(name="AI CHATS", value=f"```fix\n{ai_count}```", inline=True)
     embed.add_field(name="PROGRESS", value=f"💬 Msgs: **{msgs}/25**\n{vc_status}", inline=False)
-    await interaction.response.send_message(embed=embed)
+    
+    # Use followup because we deferred
+    await interaction.followup.send(embed=embed)
 
 @client.tree.command(name="familytree", description="Displays Hazakura Household")
 async def familytree(interaction: discord.Interaction):
-    desc = "**👑 Head**\n`Lady Hazakura`\n\n**💍 Partner**\n`Lord Hazakura`\n\n**🌹 Children**\n`Alec`, `Aaron`, `Kerry`, `Mono`, `Super`\n\n**✨ Grandchildren**\n`Cataria`, `Dexter`, `Mochi`\n\n**🌙 Others**\n`Karma`, `Erna`, `Sxnity`, `Ace` (Pet)"
+    desc = """
+**👑 The Head**
+`Lady Hazakura` (Mother/Owner)
+
+**💍 The Partner**
+`Lord Hazakura` (Husband)
+
+**🏛️ The Elders**
+`Father Hazakura` (Father)
+
+**⚜️ The Siblings**
+`Karma Hazakura` (Sibling)
+`Erna|Majira Hazakura` (Sister)
+`Sxnity Hazakura` (Brother)
+
+**🌹 The Children**
+`Alec Hazakura`, `Aaron Hazakura`, `Kerry Hazakura`
+`Mono Hazakura`, `Super Hazakura`
+
+**✨ The Grandchildren**
+`Cataria Hazakura` (Child of Alec)
+`Dexter Hazakura` (Child of Alec)
+`Mochi` (Child of Aaron)
+
+**🌙 Nieces, Nephews & Others**
+`Unknown` (Child of Karma)
+`Luriella` (Foster Child/Niece)
+
+**⛓️ The Pet**
+`Ace Hazakura`
+    """
     await interaction.response.send_message(embed=get_embed("🥀 The Hazakura Household", desc, COLOR_BLACK))
 
 # ================= MODERATION =================
@@ -234,9 +269,10 @@ async def weekly(interaction: discord.Interaction):
 
 @client.tree.command(name="leaderboard", description="Top 10")
 async def leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer() # Defer to prevent timeout
     top = user_data.find().sort("levels", -1).limit(10)
     desc = "\n".join([f"**{i}.** <@{u['_id']}> : `{u['levels']}`" for i, u in enumerate(top, 1)])
-    await interaction.response.send_message(embed=get_embed("🏆 Leaderboard", desc, COLOR_PINK))
+    await interaction.followup.send(embed=get_embed("🏆 Leaderboard", desc, COLOR_PINK))
 
 # ================= EVENTS =================
 voice_sessions = {}
@@ -260,11 +296,17 @@ async def on_message(message):
     # AI
     if message.channel.id == AI_CHANNEL_ID and not profile.get("blacklisted", False):
         if client.user in message.mentions or (message.reference and message.reference.resolved.author == client.user):
-            # REACTION LOGIC: Standard Purple Heart 💜 (Change to custom ID if needed)
+            # REACTION LOGIC (Fixed for Custom Emoji)
+            # ⚠️ IMPORTANT: To get the ID, type \:Purple_Book: in Discord. 
+            # It will look like: <a:Purple_Book:123456789>
+            # Paste JUST THE ID NUMBER below where it says 123456789 (keep it as a string)
+            # If you don't have the ID yet, use "💜"
             try:
-                await message.add_reaction("Purple_Book") 
+                # EXAMPLE: await message.add_reaction("<a:Purple_Book:YOUR_ID_HERE>") 
+                # OR if it's not animated: "<:Purple_Book:YOUR_ID_HERE>"
+                await message.add_reaction("<a:Purple_Book:1445900280234512475>") 
             except:
-                pass # Fails if bot lacks permission to react
+                pass 
 
             async with message.channel.typing():
                 history = ai_memory.find_one({"_id": str(message.channel.id)})
@@ -277,10 +319,7 @@ async def on_message(message):
                 try:
                     response = await asyncio.to_thread(lambda: client_ai.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=200))
                     reply = response.choices[0].message.content
-                    
-                    # CLEANUP: Remove ID tag if AI still hallucinates it
-                    if reply.startswith("[User ID:"):
-                        reply = reply.split("]", 1)[-1].strip()
+                    if reply.startswith("[User ID:"): reply = reply.split("]", 1)[-1].strip()
 
                     await message.reply(reply)
                     history.extend([{"role": "user", "content": tagged_input}, {"role": "assistant", "content": reply}])
