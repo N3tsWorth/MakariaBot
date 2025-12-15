@@ -52,7 +52,7 @@ Household & Relationships (Check the ID provided in the system tag):
 1444063874910523526 (Alec/Child): The "best" child (rarely acknowledged).
 529424214550118400 (Kerry/Child): Speak simply to him. Dumb down your sophisticated vocabulary slightly when addressing him.
 1237129159269027871 (Luriella/Niece): Foster child. Acknowledge she is dating Ace. Treat with family respect.
-768819665291444225 (Ace/Pet): You own him. Be gentle but possessive, while also keeping your cold/bored personality. Treat him like a pet you are fond of, but keep your dignity. Do not be overly "cutesy." Acknowledge he is dating Luriella. 
+768819665291444225 (Ace/Pet): You own him. Be gentle but possessive, while also keeping your cold/bored personality. Treat him like a pet you are fond of, but keep your dignity. Do not be overly "cutesy."
 
 Other Family Members (Treat these as Family/Blood - Acknowledge them, do not treat as strangers):
 353322621154361346 (Sxnity/Brother)
@@ -92,6 +92,30 @@ def get_user_profile(user_id):
 
 def update_profile(user_id, update_dict):
     user_data.update_one({"_id": str(user_id)}, {"$set": update_dict}, upsert=True)
+
+def get_cooldown_string(last_iso, cooldown_seconds):
+    """Calculates remaining time and returns a formatted string."""
+    if not last_iso:
+        return True, "✅ **Ready to Claim!**"
+    
+    last = datetime.datetime.fromisoformat(last_iso)
+    now = datetime.datetime.now()
+    elapsed = (now - last).total_seconds()
+    
+    if elapsed >= cooldown_seconds:
+        return True, "✅ **Ready to Claim!**"
+    
+    remaining = cooldown_seconds - elapsed
+    days = int(remaining // 86400)
+    hours = int((remaining % 86400) // 3600)
+    minutes = int((remaining % 3600) // 60)
+    
+    time_str = ""
+    if days > 0: time_str += f"{days}d "
+    if hours > 0: time_str += f"{hours}h "
+    time_str += f"{minutes}m"
+    
+    return False, f"⏳ **{time_str}** remaining"
 
 # ================= BOT SETUP =================
 intents = discord.Intents.default()
@@ -154,12 +178,6 @@ async def aiunblacklist(interaction: discord.Interaction, user: discord.Member):
     update_profile(user.id, {"blacklisted": False})
     await interaction.response.send_message(embed=get_embed("User Unblacklisted", f"✅ {user.mention} unblocked.", COLOR_PINK))
 
-@client.tree.command(name="reloadbot", description="[Admin] Restarts bot")
-async def reloadbot(interaction: discord.Interaction):
-    if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    await interaction.response.send_message("🔄 **Reloading Systems...**")
-    sys.exit(0)
-
 @client.tree.command(name="prompt", description="[Admin] View AI Prompt")
 async def view_prompt(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
@@ -175,16 +193,23 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
     msgs = profile.get("msg_count", 0)
     ai_count = profile.get("ai_interactions", 0)
     
+    # Calculate VC
     vc_status = "Not in VC"
     if target.id in voice_sessions:
         elapsed = (datetime.datetime.now() - voice_sessions[target.id]).total_seconds()
         vc_status = f"🎙️ In VC for {int(elapsed/60)}m"
 
+    # Calculate Cooldowns
+    is_daily_ready, daily_text = get_cooldown_string(profile.get("last_daily"), 86400)
+    is_weekly_ready, weekly_text = get_cooldown_string(profile.get("last_weekly"), 604800)
+
     embed = discord.Embed(title=f"📊 Stats for {target.display_name}", color=COLOR_PINK)
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="LEVELS", value=f"```fix\n{lvl}```", inline=True)
     embed.add_field(name="AI CHATS", value=f"```fix\n{ai_count}```", inline=True)
-    embed.add_field(name="PROGRESS", value=f"💬 Msgs: **{msgs}/25**\n{vc_status}", inline=False)
+    embed.add_field(name="PASSIVE PROGRESS", value=f"💬 Msgs: **{msgs}/25**\n{vc_status}", inline=False)
+    embed.add_field(name="COOLDOWNS", value=f"📅 Daily: {daily_text}\n📆 Weekly: {weekly_text}", inline=False)
+    
     await interaction.followup.send(embed=embed)
 
 @client.tree.command(name="familytree", description="Displays Hazakura Household")
@@ -260,20 +285,28 @@ async def levels(interaction: discord.Interaction, user: discord.Member = None):
 async def daily(interaction: discord.Interaction):
     uid = str(interaction.user.id)
     profile = get_user_profile(uid)
-    now = datetime.datetime.now()
-    if profile["last_daily"] and (now - datetime.datetime.fromisoformat(profile["last_daily"])).total_seconds() < 86400:
-        return await interaction.response.send_message(embed=get_embed("Cooldown", "Already claimed today!", COLOR_BLACK), ephemeral=True)
-    update_profile(uid, {"levels": profile["levels"] + 50, "last_daily": now.isoformat()})
+    
+    # Check cooldown using helper
+    is_ready, time_left_text = get_cooldown_string(profile.get("last_daily"), 86400)
+    
+    if not is_ready:
+        return await interaction.response.send_message(embed=get_embed("Cooldown", f"You cannot claim yet.\n{time_left_text}", COLOR_BLACK), ephemeral=True)
+    
+    update_profile(uid, {"levels": profile["levels"] + 50, "last_daily": datetime.datetime.now().isoformat()})
     await interaction.response.send_message(embed=get_embed("Daily Claimed", "+50 Levels", COLOR_PINK))
 
 @client.tree.command(name="weekly", description="Claim 100 levels")
 async def weekly(interaction: discord.Interaction):
     uid = str(interaction.user.id)
     profile = get_user_profile(uid)
-    now = datetime.datetime.now()
-    if profile["last_weekly"] and (now - datetime.datetime.fromisoformat(profile["last_weekly"])).total_seconds() < 604800:
-        return await interaction.response.send_message(embed=get_embed("Cooldown", "Already claimed this week!", COLOR_BLACK), ephemeral=True)
-    update_profile(uid, {"levels": profile["levels"] + 100, "last_weekly": now.isoformat()})
+    
+    # Check cooldown using helper
+    is_ready, time_left_text = get_cooldown_string(profile.get("last_weekly"), 604800)
+    
+    if not is_ready:
+        return await interaction.response.send_message(embed=get_embed("Cooldown", f"You cannot claim yet.\n{time_left_text}", COLOR_BLACK), ephemeral=True)
+    
+    update_profile(uid, {"levels": profile["levels"] + 100, "last_weekly": datetime.datetime.now().isoformat()})
     await interaction.response.send_message(embed=get_embed("Weekly Claimed", "+100 Levels", COLOR_PINK))
 
 @client.tree.command(name="leaderboard", description="Top 10")
@@ -342,7 +375,7 @@ class SocialButtons(discord.ui.View):
 async def socials(interaction: discord.Interaction):
     embed = discord.Embed(description="✦･ﾟ: *✧･ﾟ:* **MILKII’S SOCIALS** *:･ﾟ✧*:･ﾟ✦\n━━━━━━━━━━━━━━━━━━━━\nWhat Would You Like To See, Darling?\n━━━━━━━━━━━━━━━━━━━━\n", color=COLOR_PINK)
     embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1037150853775237121/1441703047163281408/image.png")
-    embed.set_footer(text="Your stuck here now, forever. ✨", icon_url="https://cdn.discordapp.com/attachments/1039430532779495459/1375313060754882660/SPOILER_Untitled595_20250522232107.png")
+    embed.set_footer(text="My garden welcomes you..", icon_url="https://cdn.discordapp.com/attachments/1039430532779495459/1375313060754882660/SPOILER_Untitled595_20250522232107.png")
     await interaction.response.send_message(embed=embed, view=SocialButtons())
 
 @tasks.loop(time=datetime.time(hour=14, minute=0, tzinfo=datetime.timezone.utc))
