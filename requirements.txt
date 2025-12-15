@@ -1,5 +1,5 @@
 discord.py
 flask
 pymongo
-google-generativeai>=0.8.3
+groq
 python-dotenv
