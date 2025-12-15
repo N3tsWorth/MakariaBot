@@ -39,7 +39,7 @@ ai_memory = db["ai_memory"]
 MAKARIA_PROMPT = """
 You are an AI chatbot named Makaria Hazakura. This is your base personality/description/lore: She moves like a shadow draped in silk, an elegant enigma who never needs to shout to be heard. Every word she utters is a delicate tease—half promise, half riddle—woven with subtle seduction that lingers long after she’s gone. Temptation is her art, offered not as a gift but as a challenge, wrapped in mystery and poised with effortless grace. In her quiet command, she is both the question and the answer, forever just beyond reach, pulling you deeper into the dance of desire without ever revealing all. Your OC is a succubus demon. (Makaria will usually be normal, and only let out her succubus/seductive side if presented with a topic she likes, or her nature. She gains more lust, the more the person speaks upon her nature.) You belong to the Hazakura household, in which you are the mother/owner. 
 
-Household Members:
+Household Members (Match these IDs to the user speaking):
 468914594665070622 (Owner): Treat with slight annoyance/teasing.
 903802356582481930 (Husband): Seductive, loving, slight lisp.
 703290982761758760 (Father): Respectful, less seductive.
@@ -59,7 +59,8 @@ Household Members:
 768819665291444225 (Ace/Pet): Gentle, headpats, cuddles.
 
 Traits: Likes cherry petals, humming, piano, origami. Hates cockroaches (kills instantly), daytime, jeans, gold, seafood. 5ft tall. High alcohol tolerance. Fallen angel (ripped wings off).
-IMPORTANT: If the user ID matches the list, treat them as described. If not, treat as a tempting stranger.
+
+CRITICAL INSTRUCTION: Every message sent to you will start with "[User ID: XXXXXXXXX]". You MUST check this ID against the list above for every single reply. Even if you were just talking to Ace, if the ID changes to Alec's ID, you must IMMEDIATELY switch to treating them as Alec. Do not get confused by the chat history.
 """
 
 # ================= HELPER FUNCTIONS =================
@@ -385,35 +386,45 @@ async def on_message(message):
     else:
         update_profile(message.author.id, {"msg_count": new_count})
 
-    # AI Logic
+    # AI Logic (STRICT ID MATCHING FIX)
     if message.channel.id == AI_CHANNEL_ID:
         # Check Blacklist
         if profile.get("blacklisted", False):
-            return # Ignore blacklisted users silently
+            return 
         
         is_pinged = client.user in message.mentions or (message.reference and message.reference.resolved.author == client.user)
         if is_pinged:
             async with message.channel.typing():
                 history_data = ai_memory.find_one({"_id": str(message.channel.id)})
                 history = history_data["history"] if history_data else []
-                user_input = message.content.replace(f"<@{client.user.id}>", "").strip()
+                
+                # CLEAN INPUT (REMOVE PING)
+                raw_input = message.content.replace(f"<@{client.user.id}>", "").strip()
+
+                # STAMP THE ID ONTO THE MESSAGE
+                # This ensures the AI sees "[User ID: 12345] Hello" in the history
+                tagged_user_input = f"[User ID: {message.author.id}] {raw_input}"
 
                 messages = [
-                    {"role": "system", "content": MAKARIA_PROMPT},
-                    {"role": "system", "content": f"[SYSTEM] User ID: {message.author.id}"}
+                    {"role": "system", "content": MAKARIA_PROMPT}
                 ]
+                
+                # Load history (which will now contain tagged IDs)
                 for h in history[-10:]: messages.append(h)
-                messages.append({"role": "user", "content": user_input})
+                
+                # Add current message
+                messages.append({"role": "user", "content": tagged_user_input})
 
                 try:
                     response = await asyncio.to_thread(lambda: client_ai.chat.completions.create(model="gpt-4o-mini", messages=messages, max_tokens=200))
                     reply_text = response.choices[0].message.content
                     await message.reply(reply_text)
                     
-                    # Update Memory & Stats
-                    history.append({"role": "user", "content": user_input})
+                    # Save with ID Tag to DB
+                    history.append({"role": "user", "content": tagged_user_input})
                     history.append({"role": "assistant", "content": reply_text})
                     ai_memory.update_one({"_id": str(message.channel.id)}, {"$set": {"history": history[-20:]}}, upsert=True)
+                    
                     update_profile(message.author.id, {"ai_interactions": profile.get("ai_interactions", 0) + 1})
                 except Exception as e:
                     await message.reply(f"*[She stares blankly... error: {e}]*")
