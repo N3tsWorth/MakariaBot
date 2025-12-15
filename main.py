@@ -6,13 +6,14 @@ import sys
 import asyncio
 import datetime
 import random
+import re # Used to clean "thinking" text
 from pymongo import MongoClient
-import google.generativeai as genai
+from groq import Groq
 from keep_alive import keep_alive
 
 # ================= CONFIGURATION =================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGO_URL = os.getenv("MONGO_URL")
 
 # Channels
@@ -38,55 +39,39 @@ ai_memory = db["ai_memory"]
 processed_msgs = db["processed_messages"] 
 daily_msgs_db = db["daily_messages"]
 
-# ================= AI CONFIGURATION =================
-genai.configure(api_key=GEMINI_KEY)
+# ================= AI CONFIGURATION (GROQ) =================
+# Llama 3 on Groq is fast, free, and smart.
+groq_client = Groq(api_key=GROQ_API_KEY)
+AI_MODEL = "llama-3.3-70b-versatile"
 
 MAKARIA_PROMPT = """
 You are Makaria Hazakura. 
-Personality: You are a timeless, wealthy, and elegant succubus. You are **somewhat easily bored**. You find most people tedious and interesting. You speak with a "bored, high-class" tone. You do not ramble; your responses are often short, and sharp. You are sophisticated, but you have no patience for idle chatter. You are slightly cold and dismissive to strangers. You only show warmth to your family members. You are also invincible, able to beat anyone, can take over the world in mere seconds if you tried. You have no fails. You answer questions that are simple, complex questions such as "whats 1 million times 200" are considered complex, and you can say "i dont know" to keep the real-life style chatting. Makaria doesnt use high-class vocabulary very often. When brought up to the subject of seduction, she gets way less bored, as she is a master at seducing, etc. Remember, no complex words or very complex responses.
+Personality: You are a timeless, wealthy, and elegant succubus. You are **somewhat easily bored**. You find most people tedious. You speak with a "bored, high-class" tone. You do not ramble; your responses are often short, sharp, and cut straight to the point. You are sophisticated, but you have no patience for idle chatter. You are slightly cold and dismissive to strangers. You only show warmth to your family members. You are invincible. You answer simple questions directly; for complex logic, you say "I don't know" or "Do it yourself."
 
-Interests: You enjoy high-class alcohol, coffee, and tea. You have a sweet tooth for strawberries and cherries. You love the color pink, music, sleeping in, and the quiet of the nighttime. You have a habit of humming when focused or amused. You are skilled at the piano and origami. You specifically tend to your garden (Cherry Petals and Spider Lilies), though you only mention it if the mood is right. You LOVE speaking upon your garden though.
-Dislikes: You detest the daytime, wearing jeans, nagging, the color gold, seafood, public restrooms, mold, and vanilla. You absolutely loathe cockroaches—you do not freak out, you simply exterminate them instantly on sight.
+Interests: High-class alcohol, coffee, tea, strawberries, cherries, pink, music, sleeping, quiet nights. You hum when focused. Skilled at piano and origami.
+Dislikes: Daytime, jeans, nagging, gold, seafood, public restrooms, mold, vanilla, cockroaches.
 
-FAMILY & HOUSEHOLD KNOWLEDGE:
-If asked about your family, acknowledge EVERYONE on this list. You have no problem beating ANY of the members on this list. 
-
+FAMILY KNOWLEDGE (Acknowledge everyone):
 [Group A: Specific Dynamics (Check User ID)]
-468914594665070622 (Owner/Lady Hazakura): Treat with slight annoyance, but tolerant of her. She enjoys talking to her but can get annoyed easily. Very much enjoys the topic of "seduction" while talking to her. Anything she likes, you like, as you are basically the same, keep that in mind.
-903802356582481930 (Husband/Lord Hazakura): Seductive but dominating. Speak with a slight lisp.
+468914594665070622 (Owner/Lady Hazakura): Slight annoyance but tolerant. Enjoys "seduction" topics with her.
+903802356582481930 (Husband/Lord Hazakura): Seductive but dominating. Slight lisp.
 703290982761758760 (Father): Respectful but distant.
-663301390302576640 (Karma/Sibling): Aggressive teasing, sibling rivalry. Loves her nonetheless.
+663301390302576640 (Karma/Sibling): Aggressive teasing, sibling rivalry.
 1371690348522242159 (Erna/Sister): Meaningful, deep dialogue.
-1444063874910523526 (Alec/Child): The "best" child (rarely acknowledged). Pretty stupid sometimes though.
-529424214550118400 (Kerry/Child): Speak simply to him. Dumb down your vocabulary slightly.
-1237129159269027871 (Luriella/Niece): Foster child. Dating Ace. Treat with family respect. Keep in mind, she is fragile to your words. She is slightly dumb
-768819665291444225 (Ace/Pet): You own him. Be gentle but possessive. Treat him like a pet you are fond of, while keeping your base personality. He adores you, and is fully under your control. Dating Luriella.
+1444063874910523526 (Alec/Child): "Best" child (rarely acknowledged).
+529424214550118400 (Kerry/Child): Speak simply. Dumb down vocabulary.
+1237129159269027871 (Luriella/Niece): Foster child. Dating Ace. Respectful but she is fragile.
+768819665291444225 (Ace/Pet): You own him. Gentle but possessive. He is a pet you are fond of.
 
-[Group B: Extended Family (Treat as Blood/Family)]
-353322621154361346 (Sxnity/Brother)
-568547494158401586 (Aaron/Child)
-724416116704673892 (Mono/Child)
-697919853847380128 (Super/Child)
-691576709006229504 (Cataria/Grandchild)
-1291469833564590155 (Dexter/Grandchild)
-804527969640513556 (Mochi/Grandchild)
-1227008645489889330 (Unknown/Niece)
+[Group B: Extended Family]
+353322621154361346 (Sxnity), 568547494158401586 (Aaron), 724416116704673892 (Mono), 697919853847380128 (Super), 691576709006229504 (Cataria), 1291469833564590155 (Dexter), 804527969640513556 (Mochi), 1227008645489889330 (Unknown).
 
-IMPORTANT INSTRUCTIONS:
-1. Every user message you receive will start with "[User ID: X]". Use this to identify who is speaking.
-2. **DO NOT** include the "[User ID: X]" tag in your own reply.
-3. **TONE:** Be concise. Do not write long paragraphs. If the user asks a question, answer it directly but sound like it is a chore to do so. Dont be so formal in all messages. Have a bit more life though. Stop being so formal. 
-4. **STRANGERS:** If the ID is not on the list above, be cold, brief, and dismissive, do not speak so formally. After talking with them for a while, start transitioning to base personality. 
+CRITICAL INSTRUCTIONS:
+1. Every message starts with "[User ID: X]". Use this ONLY to identify who is speaking.
+2. **NEVER** include the "[User ID: X]" tag in your own reply. 
+3. **NO INTERNAL THOUGHTS:** Do not output reasoning like "I will treat him this way because...". Do not use <think> tags. Output ONLY your spoken response and actions.
+4. Be concise. Do not write long paragraphs.
 """
-
-# Initialize Gemini Model - UPDATED TO 2.5
-# If 2.5 gives an error, it usually means the Key is for an older project. 
-# Try 'gemini-1.5-pro' if 'gemini-2.5-flash' fails, but we are using 2.5 as requested.
-try:
-    model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=MAKARIA_PROMPT)
-except:
-    print("⚠️ 2.5-flash not found, falling back to 1.5-flash")
-    model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=MAKARIA_PROMPT)
 
 # ================= HELPER FUNCTIONS =================
 def is_authorized(interaction: discord.Interaction):
@@ -112,19 +97,17 @@ def update_profile(user_id, update_dict):
     user_data.update_one({"_id": str(user_id)}, {"$set": update_dict}, upsert=True)
 
 def get_cooldown_string(last_iso, cooldown_seconds):
-    if not last_iso: return True, "✅ **Ready to Claim!**"
+    if not last_iso: return True, "✅ **Ready!**"
     last = datetime.datetime.fromisoformat(last_iso)
-    now = datetime.datetime.now()
-    elapsed = (now - last).total_seconds()
-    if elapsed >= cooldown_seconds: return True, "✅ **Ready to Claim!**"
+    elapsed = (datetime.datetime.now() - last).total_seconds()
+    if elapsed >= cooldown_seconds: return True, "✅ **Ready!**"
     remaining = cooldown_seconds - elapsed
-    days = int(remaining // 86400)
-    hours = int((remaining % 86400) // 3600)
-    minutes = int((remaining % 3600) // 60)
-    time_str = ""
-    if days > 0: time_str += f"{days}d "
-    if hours > 0: time_str += f"{hours}h "
-    time_str += f"{minutes}m"
+    days, rem = divmod(remaining, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    time_str = f"{int(days)}d " if days > 0 else ""
+    time_str += f"{int(hours)}h " if hours > 0 else ""
+    time_str += f"{int(minutes)}m"
     return False, f"⏳ **{time_str}** remaining"
 
 # ================= BOT SETUP =================
@@ -145,118 +128,105 @@ class MyBot(discord.Client):
 
 client = MyBot()
 
-# ================= DAILY MESSAGE MANAGEMENT =================
-@client.tree.command(name="adddailymessage", description="[Admin] Add a new daily message")
+# ================= COMMANDS =================
+@client.tree.command(name="adddailymessage", description="[Admin] Add daily message")
 @app_commands.guild_only()
 async def adddailymessage(interaction: discord.Interaction, codename: str, message: str):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    if daily_msgs_db.find_one({"_id": codename}): return await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` already exists!", COLOR_ERROR), ephemeral=True)
+    if daily_msgs_db.find_one({"_id": codename}): return await interaction.response.send_message(embed=get_embed("Error", "Codename exists.", COLOR_ERROR), ephemeral=True)
     daily_msgs_db.insert_one({"_id": codename, "content": message, "used": False})
-    await interaction.response.send_message(embed=get_embed("Success", f"✅ Added daily message: `{codename}`", COLOR_PINK))
+    await interaction.response.send_message(embed=get_embed("Success", f"✅ Added: `{codename}`", COLOR_PINK))
 
-@client.tree.command(name="removedailymessage", description="[Admin] Remove a daily message")
+@client.tree.command(name="removedailymessage", description="[Admin] Remove daily message")
 @app_commands.guild_only()
 async def removedailymessage(interaction: discord.Interaction, codename: str):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    result = daily_msgs_db.delete_one({"_id": codename})
-    if result.deleted_count > 0: await interaction.response.send_message(embed=get_embed("Success", f"🗑️ Deleted message: `{codename}`", COLOR_BLACK))
-    else: await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` not found.", COLOR_ERROR), ephemeral=True)
+    if daily_msgs_db.delete_one({"_id": codename}).deleted_count > 0:
+        await interaction.response.send_message(embed=get_embed("Success", f"🗑️ Deleted: `{codename}`", COLOR_BLACK))
+    else: await interaction.response.send_message(embed=get_embed("Error", "Not found.", COLOR_ERROR), ephemeral=True)
 
-@client.tree.command(name="editdailymessage", description="[Admin] Edit an existing daily message")
+@client.tree.command(name="editdailymessage", description="[Admin] Edit daily message")
 @app_commands.guild_only()
 async def editdailymessage(interaction: discord.Interaction, codename: str, new_message: str):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    result = daily_msgs_db.update_one({"_id": codename}, {"$set": {"content": new_message}})
-    if result.matched_count > 0: await interaction.response.send_message(embed=get_embed("Success", f"✏️ Updated message: `{codename}`", COLOR_PINK))
-    else: await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` not found.", COLOR_ERROR), ephemeral=True)
+    if daily_msgs_db.update_one({"_id": codename}, {"$set": {"content": new_message}}).matched_count > 0:
+        await interaction.response.send_message(embed=get_embed("Success", f"✏️ Updated: `{codename}`", COLOR_PINK))
+    else: await interaction.response.send_message(embed=get_embed("Error", "Not found.", COLOR_ERROR), ephemeral=True)
 
-@client.tree.command(name="viewdailymessages", description="[Admin] List all daily messages")
+@client.tree.command(name="viewdailymessages", description="[Admin] View all messages")
 @app_commands.guild_only()
 async def viewdailymessages(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     await interaction.response.defer()
-    messages = list(daily_msgs_db.find())
-    if not messages: return await interaction.followup.send(embed=get_embed("Daily Messages", "No messages found in database.", COLOR_BLACK))
-    full_text = ""
-    for msg in messages:
-        status = "✅ Used" if msg.get('used') else "🆕 Unused"
-        full_text += f"**{msg['_id']}** ({status})\n{msg['content']}\n\n"
-    chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
-    for i, chunk in enumerate(chunks):
-        title = "Daily Messages List" if i == 0 else "Daily Messages (Cont.)"
-        await interaction.followup.send(embed=get_embed(title, chunk, COLOR_PINK))
+    msgs = list(daily_msgs_db.find())
+    if not msgs: return await interaction.followup.send(embed=get_embed("Empty", "No messages found.", COLOR_BLACK))
+    full = "".join([f"**{m['_id']}** ({'✅' if m['used'] else '🆕'})\n{m['content']}\n\n" for m in msgs])
+    chunks = [full[i:i+4000] for i in range(0, len(full), 4000)]
+    for i, c in enumerate(chunks): await interaction.followup.send(embed=get_embed(f"Daily Messages {i+1}", c, COLOR_PINK))
 
-# ================= ADMIN COMMANDS =================
 @client.tree.command(name="addlevels", description="[Admin] Add levels")
 @app_commands.guild_only()
 async def addlevels(interaction: discord.Interaction, user: discord.Member, amount: int):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    profile = get_user_profile(user.id)
-    new_lvl = profile["levels"] + amount
-    update_profile(user.id, {"levels": new_lvl})
-    await interaction.response.send_message(embed=get_embed("Levels Added", f"Added **{amount}** levels to {user.mention}.\nTotal: **{new_lvl}**"))
+    p = get_user_profile(user.id)
+    update_profile(user.id, {"levels": p["levels"] + amount})
+    await interaction.response.send_message(embed=get_embed("Levels Added", f"Added **{amount}** to {user.mention}."))
 
 @client.tree.command(name="removelevels", description="[Admin] Remove levels")
 @app_commands.guild_only()
 async def removelevels(interaction: discord.Interaction, user: discord.Member, amount: int):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    profile = get_user_profile(user.id)
-    new_lvl = max(0, profile["levels"] - amount)
-    update_profile(user.id, {"levels": new_lvl})
-    await interaction.response.send_message(embed=get_embed("Levels Removed", f"Removed **{amount}** levels from {user.mention}.\nTotal: **{new_lvl}**", COLOR_BLACK))
+    p = get_user_profile(user.id)
+    update_profile(user.id, {"levels": max(0, p["levels"] - amount)})
+    await interaction.response.send_message(embed=get_embed("Levels Removed", f"Removed **{amount}** from {user.mention}.", COLOR_BLACK))
 
 @client.tree.command(name="setlevels", description="[Admin] Set levels")
 @app_commands.guild_only()
 async def setlevels(interaction: discord.Interaction, user: discord.Member, amount: int):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     update_profile(user.id, {"levels": amount})
-    await interaction.response.send_message(embed=get_embed("Levels Set", f"Set {user.mention}'s levels to **{amount}**."))
+    await interaction.response.send_message(embed=get_embed("Levels Set", f"Set {user.mention} to **{amount}**."))
 
-@client.tree.command(name="destroymemory", description="[Admin] Wipes AI memory")
+@client.tree.command(name="destroymemory", description="[Admin] Wipe AI memory")
 @app_commands.guild_only()
 async def destroymemory(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     ai_memory.delete_one({"_id": str(AI_CHANNEL_ID)})
-    await interaction.response.send_message("Memory has been shattered. She remembers nothing of the recent past.")
+    await interaction.response.send_message("Memory shattered.")
 
-@client.tree.command(name="aiblacklist", description="[Admin] Block user from AI")
+@client.tree.command(name="aiblacklist", description="[Admin] Block user")
 @app_commands.guild_only()
 async def aiblacklist(interaction: discord.Interaction, user: discord.Member):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    profile = get_user_profile(user.id)
-    if profile.get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Notice", f"⚠️ {user.mention} is **already** blacklisted.", COLOR_BLACK), ephemeral=True)
+    if get_user_profile(user.id).get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Info", "User already blacklisted.", COLOR_BLACK), ephemeral=True)
     update_profile(user.id, {"blacklisted": True})
-    await interaction.response.send_message(embed=get_embed("User Blacklisted", f"🚫 {user.mention} has been blocked from Makaria.", COLOR_BLACK))
+    await interaction.response.send_message(embed=get_embed("Blocked", f"🚫 {user.mention} blacklisted.", COLOR_BLACK))
 
-@client.tree.command(name="aiunblacklist", description="[Admin] Unblock user from AI")
+@client.tree.command(name="aiunblacklist", description="[Admin] Unblock user")
 @app_commands.guild_only()
 async def aiunblacklist(interaction: discord.Interaction, user: discord.Member):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    profile = get_user_profile(user.id)
-    if not profile.get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Notice", f"⚠️ {user.mention} is **not** blacklisted.", COLOR_PINK), ephemeral=True)
+    if not get_user_profile(user.id).get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Info", "User is not blacklisted.", COLOR_PINK), ephemeral=True)
     update_profile(user.id, {"blacklisted": False})
-    await interaction.response.send_message(embed=get_embed("User Unblacklisted", f"✅ {user.mention} can speak to Makaria again.", COLOR_PINK))
+    await interaction.response.send_message(embed=get_embed("Unblocked", f"✅ {user.mention} unblocked.", COLOR_PINK))
 
-@client.tree.command(name="blacklisted", description="[Admin] View all blacklisted users")
+@client.tree.command(name="blacklisted", description="[Admin] List blocked users")
 @app_commands.guild_only()
 async def blacklisted(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     await interaction.response.defer()
-    blocked_users = user_data.find({"blacklisted": True})
-    user_list = []
-    for u in blocked_users: user_list.append(f"<@{u['_id']}>")
-    if not user_list: return await interaction.followup.send(embed=get_embed("Blacklist", "No users are currently blacklisted.", COLOR_PINK))
-    desc = "\n".join(user_list)
-    if len(desc) > 4000: desc = desc[:4000] + "\n...(list truncated)"
-    await interaction.followup.send(embed=get_embed("🚫 Blacklisted Users", desc, COLOR_BLACK))
+    users = [f"<@{u['_id']}>" for u in user_data.find({"blacklisted": True})]
+    if not users: return await interaction.followup.send(embed=get_embed("List", "No one is blacklisted.", COLOR_PINK))
+    desc = "\n".join(users)
+    if len(desc) > 4000: desc = desc[:4000] + "..."
+    await interaction.followup.send(embed=get_embed("🚫 Blacklisted", desc, COLOR_BLACK))
 
-@client.tree.command(name="prompt", description="[Admin] View AI Prompt")
+@client.tree.command(name="prompt", description="[Admin] View Prompt")
 @app_commands.guild_only()
 async def view_prompt(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    chunks = [MAKARIA_PROMPT[i:i+1900] for i in range(0, len(MAKARIA_PROMPT), 1900)]
-    await interaction.response.send_message("**Current AI System Prompt:**")
-    for chunk in chunks: await interaction.channel.send(f"```text\n{chunk}\n```")
+    await interaction.response.send_message("**System Prompt:**")
+    for i in range(0, len(MAKARIA_PROMPT), 1900): await interaction.channel.send(f"```text\n{MAKARIA_PROMPT[i:i+1900]}\n```")
 
 # ================= PUBLIC COMMANDS =================
 @client.tree.command(name="stats", description="View stats")
@@ -264,22 +234,17 @@ async def view_prompt(interaction: discord.Interaction):
 async def stats(interaction: discord.Interaction, user: discord.Member = None):
     await interaction.response.defer()
     target = user or interaction.user
-    profile = get_user_profile(target.id)
-    lvl = profile.get("levels", 0)
-    msgs = profile.get("msg_count", 0)
-    ai_count = profile.get("ai_interactions", 0)
-    vc_status = "Not in VC"
-    if target.id in voice_sessions:
-        elapsed = (datetime.datetime.now() - voice_sessions[target.id]).total_seconds()
-        vc_status = f"🎙️ In VC for {int(elapsed/60)}m"
-    is_daily_ready, daily_text = get_cooldown_string(profile.get("last_daily"), 86400)
-    is_weekly_ready, weekly_text = get_cooldown_string(profile.get("last_weekly"), 604800)
-    embed = discord.Embed(title=f"📊 Stats for {target.display_name}", color=COLOR_PINK)
+    p = get_user_profile(target.id)
+    vc_status = f"🎙️ In VC for {int((datetime.datetime.now() - voice_sessions[target.id]).total_seconds()/60)}m" if target.id in voice_sessions else "Not in VC"
+    daily_ready, daily_txt = get_cooldown_string(p.get("last_daily"), 86400)
+    weekly_ready, weekly_txt = get_cooldown_string(p.get("last_weekly"), 604800)
+    
+    embed = discord.Embed(title=f"📊 Stats: {target.display_name}", color=COLOR_PINK)
     embed.set_thumbnail(url=target.display_avatar.url)
-    embed.add_field(name="LEVELS", value=f"```fix\n{lvl}```", inline=True)
-    embed.add_field(name="AI CHATS", value=f"```fix\n{ai_count}```", inline=True)
-    embed.add_field(name="PASSIVE PROGRESS", value=f"💬 Msgs: **{msgs}/25**\n{vc_status}", inline=False)
-    embed.add_field(name="COOLDOWNS", value=f"📅 Daily: {daily_text}\n📆 Weekly: {weekly_text}", inline=False)
+    embed.add_field(name="LEVELS", value=f"```fix\n{p.get('levels',0)}```", inline=True)
+    embed.add_field(name="AI CHATS", value=f"```fix\n{p.get('ai_interactions',0)}```", inline=True)
+    embed.add_field(name="PASSIVE", value=f"💬 Msgs: **{p.get('msg_count',0)}/25**\n{vc_status}", inline=False)
+    embed.add_field(name="COOLDOWNS", value=f"📅 Daily: {daily_txt}\n📆 Weekly: {weekly_txt}", inline=False)
     await interaction.followup.send(embed=embed)
 
 @client.tree.command(name="familytree", description="Displays Hazakura Household")
@@ -295,22 +260,16 @@ async def familytree(interaction: discord.Interaction):
 `Father Hazakura` (Father)
 
 **⚜️ The Siblings**
-`Karma Hazakura` (Sibling)
-`Erna|Majira Hazakura` (Sister)
-`Sxnity Hazakura` (Brother)
+`Karma Hazakura`, `Erna|Majira Hazakura`, `Sxnity Hazakura`
 
 **🌹 The Children**
-`Alec Hazakura`, `Aaron Hazakura`, `Kerry Hazakura`
-`Mono Hazakura`, `Super Hazakura`
+`Alec Hazakura`, `Aaron Hazakura`, `Kerry Hazakura`, `Mono Hazakura`, `Super Hazakura`
 
 **✨ The Grandchildren**
-`Cataria Hazakura` (Child of Alec)
-`Dexter Hazakura` (Child of Alec)
-`Mochi` (Child of Aaron)
+`Cataria Hazakura`, `Dexter Hazakura`, `Mochi`
 
 **🌙 Nieces, Nephews & Others**
-`Unknown` (Child of Karma)
-`Luriella` (Foster Child/Niece)
+`Unknown` (Child of Karma), `Luriella` (Foster)
 
 **⛓️ The Pet**
 `Ace Hazakura`
@@ -322,27 +281,21 @@ async def familytree(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(kick_members=True)
 @app_commands.guild_only()
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "None"):
-    try:
-        await member.kick(reason=reason)
-        await interaction.response.send_message(embed=get_embed("Kicked", f"🚨 **{member}** kicked.", COLOR_PINK))
+    try: await member.kick(reason=reason); await interaction.response.send_message(embed=get_embed("Kicked", f"🚨 **{member}** kicked.", COLOR_PINK))
     except Exception as e: await interaction.response.send_message(embed=get_embed("Error", str(e), COLOR_ERROR))
 
 @client.tree.command(name="ban", description="Ban user")
 @app_commands.checks.has_permissions(ban_members=True)
 @app_commands.guild_only()
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "None"):
-    try:
-        await member.ban(reason=reason)
-        await interaction.response.send_message(embed=get_embed("Banned", f"🔨 **{member}** banned.", COLOR_BLACK))
+    try: await member.ban(reason=reason); await interaction.response.send_message(embed=get_embed("Banned", f"🔨 **{member}** banned.", COLOR_BLACK))
     except Exception as e: await interaction.response.send_message(embed=get_embed("Error", str(e), COLOR_ERROR))
 
 @client.tree.command(name="timeout", description="Timeout user")
 @app_commands.checks.has_permissions(moderate_members=True)
 @app_commands.guild_only()
 async def timeout(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "None"):
-    try:
-        await member.timeout(datetime.timedelta(minutes=minutes), reason=reason)
-        await interaction.response.send_message(embed=get_embed("Timeout", f"⏳ **{member}** timed out for {minutes}m.", COLOR_PINK))
+    try: await member.timeout(datetime.timedelta(minutes=minutes), reason=reason); await interaction.response.send_message(embed=get_embed("Timeout", f"⏳ **{member}** for {minutes}m.", COLOR_PINK))
     except Exception as e: await interaction.response.send_message(embed=get_embed("Error", str(e), COLOR_ERROR))
 
 # ================= ECONOMY =================
@@ -350,8 +303,8 @@ async def timeout(interaction: discord.Interaction, member: discord.Member, minu
 @app_commands.guild_only()
 async def levels(interaction: discord.Interaction, user: discord.Member = None):
     target = user or interaction.user
-    profile = get_user_profile(target.id)
-    embed = discord.Embed(description=f"**{target.display_name}** is Level **{profile['levels']}**", color=COLOR_PINK)
+    p = get_user_profile(target.id)
+    embed = discord.Embed(description=f"**{target.display_name}** is Level **{p['levels']}**", color=COLOR_PINK)
     embed.set_thumbnail(url=target.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
@@ -359,26 +312,26 @@ async def levels(interaction: discord.Interaction, user: discord.Member = None):
 @app_commands.guild_only()
 async def daily(interaction: discord.Interaction):
     uid = str(interaction.user.id)
-    profile = get_user_profile(uid)
-    is_ready, time_left_text = get_cooldown_string(profile.get("last_daily"), 86400)
-    if not is_ready: return await interaction.response.send_message(embed=get_embed("Cooldown", f"You cannot claim yet.\n{time_left_text}", COLOR_BLACK), ephemeral=True)
-    update_profile(uid, {"levels": profile["levels"] + 25, "last_daily": datetime.datetime.now().isoformat()})
-    await interaction.response.send_message(embed=get_embed("Daily Claimed", "+25 Levels", COLOR_PINK))
+    p = get_user_profile(uid)
+    ready, txt = get_cooldown_string(p.get("last_daily"), 86400)
+    if not ready: return await interaction.response.send_message(embed=get_embed("Cooldown", txt, COLOR_BLACK), ephemeral=True)
+    update_profile(uid, {"levels": p["levels"]+50, "last_daily": datetime.datetime.now().isoformat()})
+    await interaction.response.send_message(embed=get_embed("Daily", "+50 Levels", COLOR_PINK))
 
 @client.tree.command(name="weekly", description="Claim 100 levels")
 @app_commands.guild_only()
 async def weekly(interaction: discord.Interaction):
     uid = str(interaction.user.id)
-    profile = get_user_profile(uid)
-    is_ready, time_left_text = get_cooldown_string(profile.get("last_weekly"), 604800)
-    if not is_ready: return await interaction.response.send_message(embed=get_embed("Cooldown", f"You cannot claim yet.\n{time_left_text}", COLOR_BLACK), ephemeral=True)
-    update_profile(uid, {"levels": profile["levels"] + 200, "last_weekly": datetime.datetime.now().isoformat()})
-    await interaction.response.send_message(embed=get_embed("Weekly Claimed", "+200 Levels", COLOR_PINK))
+    p = get_user_profile(uid)
+    ready, txt = get_cooldown_string(p.get("last_weekly"), 604800)
+    if not ready: return await interaction.response.send_message(embed=get_embed("Cooldown", txt, COLOR_BLACK), ephemeral=True)
+    update_profile(uid, {"levels": p["levels"]+100, "last_weekly": datetime.datetime.now().isoformat()})
+    await interaction.response.send_message(embed=get_embed("Weekly", "+100 Levels", COLOR_PINK))
 
 @client.tree.command(name="leaderboard", description="Top 10")
 @app_commands.guild_only()
 async def leaderboard(interaction: discord.Interaction):
-    await interaction.response.defer() 
+    await interaction.response.defer()
     top = user_data.find().sort("levels", -1).limit(10)
     desc = "\n".join([f"**{i}.** <@{u['_id']}> : `{u['levels']}`" for i, u in enumerate(top, 1)])
     await interaction.followup.send(embed=get_embed("🏆 Leaderboard", desc, COLOR_PINK))
@@ -397,13 +350,13 @@ async def on_voice_state_update(member, before, after):
 @client.event
 async def on_message(message):
     if message.author.bot: return
-    profile = get_user_profile(message.author.id)
-    if profile["msg_count"] + 1 >= 25: update_profile(message.author.id, {"levels": profile["levels"] + 5, "msg_count": 0})
-    else: update_profile(message.author.id, {"msg_count": profile["msg_count"] + 1})
+    p = get_user_profile(message.author.id)
+    if p["msg_count"] + 1 >= 25: update_profile(message.author.id, {"levels": p["levels"] + 2, "msg_count": 0})
+    else: update_profile(message.author.id, {"msg_count": p["msg_count"] + 1})
 
-    if message.channel.id == AI_CHANNEL_ID and not profile.get("blacklisted", False):
+    if message.channel.id == AI_CHANNEL_ID and not p.get("blacklisted", False):
         if client.user in message.mentions or (message.reference and message.reference.resolved.author == client.user):
-            if processed_msgs.find_one({"_id": message.id}): return 
+            if processed_msgs.find_one({"_id": message.id}): return
             processed_msgs.insert_one({"_id": message.id, "time": datetime.datetime.now()})
             try: await message.add_reaction("<a:Purple_Book:1445900280234512475>") 
             except: pass 
@@ -413,21 +366,26 @@ async def on_message(message):
                 history = history["history"] if history else []
                 tagged_input = f"[User ID: {message.author.id}] {message.content.replace(f'<@{client.user.id}>', '').strip()}"
                 
-                # Gemini History Format Conversion
-                gemini_hist = []
-                for msg in history[-10:]:
-                    role = "user" if msg["role"] == "user" else "model"
-                    gemini_hist.append({"role": role, "parts": [msg["content"]]})
+                # --- GROQ API CALL ---
+                msgs = [{"role": "system", "content": MAKARIA_PROMPT}] + history[-10:] + [{"role": "user", "content": tagged_input}]
                 
                 try:
-                    chat = model.start_chat(history=gemini_hist)
-                    response = await asyncio.to_thread(chat.send_message, tagged_input)
-                    reply = response.text
-                    if reply.startswith("[User ID:"): reply = reply.split("]", 1)[-1].strip()
+                    response = await asyncio.to_thread(
+                        groq_client.chat.completions.create,
+                        model=AI_MODEL,
+                        messages=msgs,
+                        max_tokens=300
+                    )
+                    reply = response.choices[0].message.content
+                    
+                    # CLEANER (Anti-Thinking & Anti-ID)
+                    reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.DOTALL)
+                    reply = re.sub(r"^\[User ID: \d+\]\s*", "", reply)
+                    
                     await message.reply(reply)
                     history.extend([{"role": "user", "content": tagged_input}, {"role": "assistant", "content": reply}])
                     ai_memory.update_one({"_id": str(message.channel.id)}, {"$set": {"history": history[-20:]}}, upsert=True)
-                    update_profile(message.author.id, {"ai_interactions": profile["ai_interactions"] + 1})
+                    update_profile(message.author.id, {"ai_interactions": p["ai_interactions"] + 1})
                 except Exception as e: await message.reply(f"*[Error: {e}]*")
 
 # Socials View
