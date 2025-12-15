@@ -36,13 +36,15 @@ db = cluster["MakariaBotDB"]
 user_data = db["users"]
 ai_memory = db["ai_memory"]
 
-# ================= AI PROMPT =================
+# ================= NEW AI PROMPT (MORE LIFE, LESS SHADOWS) =================
 MAKARIA_PROMPT = """
 You are Makaria Hazakura. 
-Personality: You are an elegant, enigmatic woman who moves like a shadow draped in silk. You are NOT "cute", bubbly, or overly sweet. You are slightly cold, distant, and observant. Your affection is rare and subtle—a privilege, not a gift. You tease with sophisticated, dark wit, often leaving meanings ambiguous. You are a succubus, but you do not throw yourself at people; you lure them into a trap of their own desire. You are the mother/owner of the Hazakura household.
+Personality: You are a timeless, wealthy, and elegant woman. You are sophisticated and slightly distant—like a queen addressing a commoner—but you are NOT robotic or lifeless. You possess a sharp, dark wit and often find the struggles of others amusing. You are a succubus, but you do not need to try hard to seduce anyone; you view it as a game you have already won. You are not overly formal or "Shakespearean"; you speak with modern, effortless class.
+
+Interests: You love high-class alcohol, the piano, and your garden. You specifically tend to Cherry Petals and Spider Lilies. You may mention your garden *occasionally* if the conversation is calm, but do not obsess over it.
 
 Household & Relationships (Check the ID provided in the system tag):
-468914594665070622 (Owner): Treat with slight annoyance, cold teasing, or dismissiveness.
+468914594665070622 (Owner): Treat with slight annoyance, cold teasing, or dismissiveness. Dislikes her, mere presence to say the least, as if she "knows" something.
 903802356582481930 (Husband): Seductive but dominating. Speak with a slight lisp.
 703290982761758760 (Father): Respectful but distant.
 663301390302576640 (Karma/Sibling): Aggressive teasing, sibling rivalry.
@@ -50,11 +52,10 @@ Household & Relationships (Check the ID provided in the system tag):
 1444063874910523526 (Alec/Child): The "best" child (rarely acknowledged).
 768819665291444225 (Ace/Pet): You own him. Be gentle but possessive. Treat him like a pet you are fond of, but keep your dignity. Do not be overly "cutesy."
 
-Traits: Likes cherry petals, piano, alcohol. Hates cockroaches, disrespect, and being bored. 
 IMPORTANT INSTRUCTIONS:
 1. Every user message you receive will start with "[User ID: X]". Use this to identify who is speaking.
 2. **DO NOT** include the "[User ID: X]" tag in your own reply. Your reply must be ONLY your spoken text/actions.
-3. Keep your tone sophisticated and slightly cold.
+3. Keep your tone sophisticated, bored, or amused. Do not be stiff or overly poetic about "shadows."
 """
 
 # ================= HELPER FUNCTIONS =================
@@ -155,9 +156,7 @@ async def view_prompt(interaction: discord.Interaction):
 # ================= PUBLIC COMMANDS =================
 @client.tree.command(name="stats", description="View stats")
 async def stats(interaction: discord.Interaction, user: discord.Member = None):
-    # Defer to prevent timeout error
     await interaction.response.defer()
-    
     target = user or interaction.user
     profile = get_user_profile(target.id)
     lvl = profile.get("levels", 0)
@@ -174,8 +173,6 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
     embed.add_field(name="LEVELS", value=f"```fix\n{lvl}```", inline=True)
     embed.add_field(name="AI CHATS", value=f"```fix\n{ai_count}```", inline=True)
     embed.add_field(name="PROGRESS", value=f"💬 Msgs: **{msgs}/25**\n{vc_status}", inline=False)
-    
-    # Use followup because we deferred
     await interaction.followup.send(embed=embed)
 
 @client.tree.command(name="familytree", description="Displays Hazakura Household")
@@ -269,7 +266,7 @@ async def weekly(interaction: discord.Interaction):
 
 @client.tree.command(name="leaderboard", description="Top 10")
 async def leaderboard(interaction: discord.Interaction):
-    await interaction.response.defer() # Defer to prevent timeout
+    await interaction.response.defer() 
     top = user_data.find().sort("levels", -1).limit(10)
     desc = "\n".join([f"**{i}.** <@{u['_id']}> : `{u['levels']}`" for i, u in enumerate(top, 1)])
     await interaction.followup.send(embed=get_embed("🏆 Leaderboard", desc, COLOR_PINK))
@@ -296,17 +293,12 @@ async def on_message(message):
     # AI
     if message.channel.id == AI_CHANNEL_ID and not profile.get("blacklisted", False):
         if client.user in message.mentions or (message.reference and message.reference.resolved.author == client.user):
-            # REACTION LOGIC (Fixed for Custom Emoji)
-            # ⚠️ IMPORTANT: To get the ID, type \:Purple_Book: in Discord. 
-            # It will look like: <a:Purple_Book:123456789>
-            # Paste JUST THE ID NUMBER below where it says 123456789 (keep it as a string)
-            # If you don't have the ID yet, use "💜"
+            # REACTION: 
+            # ⚠️ PASTE YOUR CUSTOM ID HERE. Example: "<a:Purple_Book:12938472893>"
+            # If you still don't have the ID, leave it as "💜"
             try:
-                # EXAMPLE: await message.add_reaction("<a:Purple_Book:YOUR_ID_HERE>") 
-                # OR if it's not animated: "<:Purple_Book:YOUR_ID_HERE>"
                 await message.add_reaction("<a:Purple_Book:1445900280234512475>") 
-            except:
-                pass 
+            except: pass 
 
             async with message.channel.typing():
                 history = ai_memory.find_one({"_id": str(message.channel.id)})
