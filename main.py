@@ -222,7 +222,7 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
 async def familytree(interaction: discord.Interaction):
     desc = """
 **👑 Her...**
-`Lady Hazakura` (Mother/Owner)
+`Lady Hazakura` (Owner)
 
 **💍 The Dragon**
 `Lord Hazakura` (Husband)
@@ -251,7 +251,7 @@ async def familytree(interaction: discord.Interaction):
 **⛓️ The Pet**
 `Ace Hazakura`
     """
-    await interaction.response.send_message(embed=get_embed("🥀 The Hazakura Household", desc, COLOR_BLACK))
+    await interaction.response.send_message(embed=get_embed("The Hazakura Household", desc, COLOR_BLACK))
 
 # ================= MODERATION =================
 @client.tree.command(name="kick", description="Kick user")
@@ -298,8 +298,8 @@ async def daily(interaction: discord.Interaction):
     if not is_ready:
         return await interaction.response.send_message(embed=get_embed("Cooldown", f"You cannot claim yet.\n{time_left_text}", COLOR_BLACK), ephemeral=True)
     
-    update_profile(uid, {"levels": profile["levels"] + 50, "last_daily": datetime.datetime.now().isoformat()})
-    await interaction.response.send_message(embed=get_embed("Daily Claimed", "+50 Levels", COLOR_PINK))
+    update_profile(uid, {"levels": profile["levels"] + 25, "last_daily": datetime.datetime.now().isoformat()})
+    await interaction.response.send_message(embed=get_embed("Daily Claimed", "+25 Levels", COLOR_PINK))
 
 @client.tree.command(name="weekly", description="Claim 100 levels")
 async def weekly(interaction: discord.Interaction):
@@ -312,8 +312,8 @@ async def weekly(interaction: discord.Interaction):
     if not is_ready:
         return await interaction.response.send_message(embed=get_embed("Cooldown", f"You cannot claim yet.\n{time_left_text}", COLOR_BLACK), ephemeral=True)
     
-    update_profile(uid, {"levels": profile["levels"] + 100, "last_weekly": datetime.datetime.now().isoformat()})
-    await interaction.response.send_message(embed=get_embed("Weekly Claimed", "+100 Levels", COLOR_PINK))
+    update_profile(uid, {"levels": profile["levels"] + 200, "last_weekly": datetime.datetime.now().isoformat()})
+    await interaction.response.send_message(embed=get_embed("Weekly Claimed", "+200 Levels", COLOR_PINK))
 
 @client.tree.command(name="leaderboard", description="Top 10")
 async def leaderboard(interaction: discord.Interaction):
@@ -338,7 +338,7 @@ async def on_message(message):
     if message.author.bot: return
     # XP
     profile = get_user_profile(message.author.id)
-    if profile["msg_count"] + 1 >= 25: update_profile(message.author.id, {"levels": profile["levels"] + 2, "msg_count": 0})
+    if profile["msg_count"] + 1 >= 25: update_profile(message.author.id, {"levels": profile["levels"] + 5, "msg_count": 0})
     else: update_profile(message.author.id, {"msg_count": profile["msg_count"] + 1})
 
     # AI (WITH DEDUPLICATION FIX)
@@ -398,6 +398,3 @@ async def daily_task():
 
 keep_alive()
 client.run(DISCORD_TOKEN)
-
-
-
