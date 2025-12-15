@@ -7,12 +7,12 @@ import asyncio
 import datetime
 import random
 from pymongo import MongoClient
-from openai import OpenAI
+import google.generativeai as genai
 from keep_alive import keep_alive
 
 # ================= CONFIGURATION =================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OPENAI_KEY = os.getenv("OPENAI_KEY")
+GEMINI_KEY = os.getenv("GEMINI_KEY") # Updated for Google
 MONGO_URL = os.getenv("MONGO_URL")
 
 # Channels
@@ -36,9 +36,11 @@ db = cluster["MakariaBotDB"]
 user_data = db["users"]
 ai_memory = db["ai_memory"]
 processed_msgs = db["processed_messages"] 
-daily_msgs_db = db["daily_messages"] # New collection for daily questions
+daily_msgs_db = db["daily_messages"]
 
-# ================= AI PROMPT =================
+# ================= AI CONFIGURATION (GEMINI) =================
+genai.configure(api_key=GEMINI_KEY)
+
 MAKARIA_PROMPT = """
 You are Makaria Hazakura. 
 Personality: You are a timeless, wealthy, and elegant succubus. You are **somewhat easily bored**. You find most people tedious and interesting. You speak with a "bored, high-class" tone. You do not ramble; your responses are often short, and sharp. You are sophisticated, but you have no patience for idle chatter. You are slightly cold and dismissive to strangers. You only show warmth to your family members. You are also invincible, able to beat anyone, can take over the world in mere seconds if you tried. You have no fails. You answer questions that are simple, complex questions such as "whats 1 million times 200" are considered complex, and you can say "i dont know" to keep the real-life style chatting. Makaria doesnt use high-class vocabulary very often. When brought up to the subject of seduction, she gets way less bored, as she is a master at seducing, etc. Remember, no complex words or very complex responses.
@@ -58,7 +60,7 @@ If asked about your family, acknowledge EVERYONE on this list. You have no probl
 1444063874910523526 (Alec/Child): The "best" child (rarely acknowledged). Pretty stupid sometimes though.
 529424214550118400 (Kerry/Child): Speak simply to him. Dumb down your vocabulary slightly.
 1237129159269027871 (Luriella/Niece): Foster child. Dating Ace. Treat with family respect. Keep in mind, she is fragile to your words. She is slightly dumb
-768819665291444225 (Ace/Pet): You own him. Be gentle but possessive. Treat him like a pet you are fond of, while keeping your base personality. He adores you, and is fully under your control. Dating Luriella.
+768819665291444225 (Ace/Pet): You own him. Be gentle but possessive. Treat him like a pet you are fond of, while keeping your base personality. He adores you, and is fully under your control.
 
 [Group B: Extended Family (Treat as Blood/Family)]
 353322621154361346 (Sxnity/Brother)
@@ -76,6 +78,9 @@ IMPORTANT INSTRUCTIONS:
 3. **TONE:** Be concise. Do not write long paragraphs. If the user asks a question, answer it directly but sound like it is a chore to do so. Dont be so formal in all messages. Have a bit more life though. Stop being so formal. 
 4. **STRANGERS:** If the ID is not on the list above, be cold, brief, and dismissive, do not speak so formally. After talking with them for a while, start transitioning to base personality. 
 """
+
+# Initialize Gemini Model
+model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=MAKARIA_PROMPT)
 
 # ================= HELPER FUNCTIONS =================
 def is_authorized(interaction: discord.Interaction):
@@ -101,27 +106,19 @@ def update_profile(user_id, update_dict):
     user_data.update_one({"_id": str(user_id)}, {"$set": update_dict}, upsert=True)
 
 def get_cooldown_string(last_iso, cooldown_seconds):
-    """Calculates remaining time and returns a formatted string."""
-    if not last_iso:
-        return True, "✅ **Ready to Claim!**"
-    
+    if not last_iso: return True, "✅ **Ready to Claim!**"
     last = datetime.datetime.fromisoformat(last_iso)
     now = datetime.datetime.now()
     elapsed = (now - last).total_seconds()
-    
-    if elapsed >= cooldown_seconds:
-        return True, "✅ **Ready to Claim!**"
-    
+    if elapsed >= cooldown_seconds: return True, "✅ **Ready to Claim!**"
     remaining = cooldown_seconds - elapsed
     days = int(remaining // 86400)
     hours = int((remaining % 86400) // 3600)
     minutes = int((remaining % 3600) // 60)
-    
     time_str = ""
     if days > 0: time_str += f"{days}d "
     if hours > 0: time_str += f"{hours}h "
     time_str += f"{minutes}m"
-    
     return False, f"⏳ **{time_str}** remaining"
 
 # ================= BOT SETUP =================
@@ -129,8 +126,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.voice_states = True
-
-client_ai = OpenAI(api_key=OPENAI_KEY)
 
 class MyBot(discord.Client):
     def __init__(self):
@@ -149,10 +144,7 @@ client = MyBot()
 @app_commands.guild_only()
 async def adddailymessage(interaction: discord.Interaction, codename: str, message: str):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    
-    if daily_msgs_db.find_one({"_id": codename}):
-        return await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` already exists!", COLOR_ERROR), ephemeral=True)
-    
+    if daily_msgs_db.find_one({"_id": codename}): return await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` already exists!", COLOR_ERROR), ephemeral=True)
     daily_msgs_db.insert_one({"_id": codename, "content": message, "used": False})
     await interaction.response.send_message(embed=get_embed("Success", f"✅ Added daily message: `{codename}`", COLOR_PINK))
 
@@ -160,41 +152,29 @@ async def adddailymessage(interaction: discord.Interaction, codename: str, messa
 @app_commands.guild_only()
 async def removedailymessage(interaction: discord.Interaction, codename: str):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    
     result = daily_msgs_db.delete_one({"_id": codename})
-    if result.deleted_count > 0:
-        await interaction.response.send_message(embed=get_embed("Success", f"🗑️ Deleted message: `{codename}`", COLOR_BLACK))
-    else:
-        await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` not found.", COLOR_ERROR), ephemeral=True)
+    if result.deleted_count > 0: await interaction.response.send_message(embed=get_embed("Success", f"🗑️ Deleted message: `{codename}`", COLOR_BLACK))
+    else: await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` not found.", COLOR_ERROR), ephemeral=True)
 
 @client.tree.command(name="editdailymessage", description="[Admin] Edit an existing daily message")
 @app_commands.guild_only()
 async def editdailymessage(interaction: discord.Interaction, codename: str, new_message: str):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    
     result = daily_msgs_db.update_one({"_id": codename}, {"$set": {"content": new_message}})
-    if result.matched_count > 0:
-        await interaction.response.send_message(embed=get_embed("Success", f"✏️ Updated message: `{codename}`", COLOR_PINK))
-    else:
-        await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` not found.", COLOR_ERROR), ephemeral=True)
+    if result.matched_count > 0: await interaction.response.send_message(embed=get_embed("Success", f"✏️ Updated message: `{codename}`", COLOR_PINK))
+    else: await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` not found.", COLOR_ERROR), ephemeral=True)
 
 @client.tree.command(name="viewdailymessages", description="[Admin] List all daily messages")
 @app_commands.guild_only()
 async def viewdailymessages(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    
     await interaction.response.defer()
-    
     messages = list(daily_msgs_db.find())
-    if not messages:
-        return await interaction.followup.send(embed=get_embed("Daily Messages", "No messages found in database.", COLOR_BLACK))
-    
+    if not messages: return await interaction.followup.send(embed=get_embed("Daily Messages", "No messages found in database.", COLOR_BLACK))
     full_text = ""
     for msg in messages:
         status = "✅ Used" if msg.get('used') else "🆕 Unused"
         full_text += f"**{msg['_id']}** ({status})\n{msg['content']}\n\n"
-    
-    # Pagination Logic
     chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
     for i, chunk in enumerate(chunks):
         title = "Daily Messages List" if i == 0 else "Daily Messages (Cont.)"
@@ -237,11 +217,8 @@ async def destroymemory(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def aiblacklist(interaction: discord.Interaction, user: discord.Member):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    
     profile = get_user_profile(user.id)
-    if profile.get("blacklisted", False):
-        return await interaction.response.send_message(embed=get_embed("Notice", f"⚠️ {user.mention} is **already** blacklisted.", COLOR_BLACK), ephemeral=True)
-
+    if profile.get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Notice", f"⚠️ {user.mention} is **already** blacklisted.", COLOR_BLACK), ephemeral=True)
     update_profile(user.id, {"blacklisted": True})
     await interaction.response.send_message(embed=get_embed("User Blacklisted", f"🚫 {user.mention} has been blocked from Makaria.", COLOR_BLACK))
 
@@ -249,11 +226,8 @@ async def aiblacklist(interaction: discord.Interaction, user: discord.Member):
 @app_commands.guild_only()
 async def aiunblacklist(interaction: discord.Interaction, user: discord.Member):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    
     profile = get_user_profile(user.id)
-    if not profile.get("blacklisted", False):
-        return await interaction.response.send_message(embed=get_embed("Notice", f"⚠️ {user.mention} is **not** blacklisted.", COLOR_PINK), ephemeral=True)
-
+    if not profile.get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Notice", f"⚠️ {user.mention} is **not** blacklisted.", COLOR_PINK), ephemeral=True)
     update_profile(user.id, {"blacklisted": False})
     await interaction.response.send_message(embed=get_embed("User Unblacklisted", f"✅ {user.mention} can speak to Makaria again.", COLOR_PINK))
 
@@ -261,37 +235,22 @@ async def aiunblacklist(interaction: discord.Interaction, user: discord.Member):
 @app_commands.guild_only()
 async def blacklisted(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    
     await interaction.response.defer()
-    
-    # Find all users where blacklisted is True
     blocked_users = user_data.find({"blacklisted": True})
     user_list = []
-    
-    for u in blocked_users:
-        user_list.append(f"<@{u['_id']}>")
-    
-    if not user_list:
-        return await interaction.followup.send(embed=get_embed("Blacklist", "No users are currently blacklisted.", COLOR_PINK))
-    
+    for u in blocked_users: user_list.append(f"<@{u['_id']}>")
+    if not user_list: return await interaction.followup.send(embed=get_embed("Blacklist", "No users are currently blacklisted.", COLOR_PINK))
     desc = "\n".join(user_list)
-    # Basic pagination check
-    if len(desc) > 4000:
-        desc = desc[:4000] + "\n...(list truncated)"
-        
+    if len(desc) > 4000: desc = desc[:4000] + "\n...(list truncated)"
     await interaction.followup.send(embed=get_embed("🚫 Blacklisted Users", desc, COLOR_BLACK))
 
 @client.tree.command(name="prompt", description="[Admin] View AI Prompt")
 @app_commands.guild_only()
 async def view_prompt(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    
-    # Split prompt into chunks of 1900 chars
     chunks = [MAKARIA_PROMPT[i:i+1900] for i in range(0, len(MAKARIA_PROMPT), 1900)]
-    
     await interaction.response.send_message("**Current AI System Prompt:**")
-    for chunk in chunks:
-        await interaction.channel.send(f"```text\n{chunk}\n```")
+    for chunk in chunks: await interaction.channel.send(f"```text\n{chunk}\n```")
 
 # ================= PUBLIC COMMANDS =================
 @client.tree.command(name="stats", description="View stats")
@@ -303,29 +262,22 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
     lvl = profile.get("levels", 0)
     msgs = profile.get("msg_count", 0)
     ai_count = profile.get("ai_interactions", 0)
-    
-    # Calculate VC
     vc_status = "Not in VC"
     if target.id in voice_sessions:
         elapsed = (datetime.datetime.now() - voice_sessions[target.id]).total_seconds()
         vc_status = f"🎙️ In VC for {int(elapsed/60)}m"
-
-    # Calculate Cooldowns
     is_daily_ready, daily_text = get_cooldown_string(profile.get("last_daily"), 86400)
     is_weekly_ready, weekly_text = get_cooldown_string(profile.get("last_weekly"), 604800)
-
     embed = discord.Embed(title=f"📊 Stats for {target.display_name}", color=COLOR_PINK)
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="LEVELS", value=f"```fix\n{lvl}```", inline=True)
     embed.add_field(name="AI CHATS", value=f"```fix\n{ai_count}```", inline=True)
     embed.add_field(name="PASSIVE PROGRESS", value=f"💬 Msgs: **{msgs}/25**\n{vc_status}", inline=False)
     embed.add_field(name="COOLDOWNS", value=f"📅 Daily: {daily_text}\n📆 Weekly: {weekly_text}", inline=False)
-    
     await interaction.followup.send(embed=embed)
 
 @client.tree.command(name="familytree", description="Displays Hazakura Household")
 async def familytree(interaction: discord.Interaction):
-    # Allowed in DMs
     desc = """
 **👑 Her...**
 `Lady Hazakura` (Owner)
@@ -402,28 +354,20 @@ async def levels(interaction: discord.Interaction, user: discord.Member = None):
 async def daily(interaction: discord.Interaction):
     uid = str(interaction.user.id)
     profile = get_user_profile(uid)
-    
     is_ready, time_left_text = get_cooldown_string(profile.get("last_daily"), 86400)
-    
-    if not is_ready:
-        return await interaction.response.send_message(embed=get_embed("Cooldown", f"You cannot claim yet.\n{time_left_text}", COLOR_BLACK), ephemeral=True)
-    
-    update_profile(uid, {"levels": profile["levels"] + 50, "last_daily": datetime.datetime.now().isoformat()})
-    await interaction.response.send_message(embed=get_embed("Daily Claimed", "+50 Levels", COLOR_PINK))
+    if not is_ready: return await interaction.response.send_message(embed=get_embed("Cooldown", f"You cannot claim yet.\n{time_left_text}", COLOR_BLACK), ephemeral=True)
+    update_profile(uid, {"levels": profile["levels"] + 25, "last_daily": datetime.datetime.now().isoformat()})
+    await interaction.response.send_message(embed=get_embed("Daily Claimed", "+25 Levels", COLOR_PINK))
 
 @client.tree.command(name="weekly", description="Claim 100 levels")
 @app_commands.guild_only()
 async def weekly(interaction: discord.Interaction):
     uid = str(interaction.user.id)
     profile = get_user_profile(uid)
-    
     is_ready, time_left_text = get_cooldown_string(profile.get("last_weekly"), 604800)
-    
-    if not is_ready:
-        return await interaction.response.send_message(embed=get_embed("Cooldown", f"You cannot claim yet.\n{time_left_text}", COLOR_BLACK), ephemeral=True)
-    
-    update_profile(uid, {"levels": profile["levels"] + 100, "last_weekly": datetime.datetime.now().isoformat()})
-    await interaction.response.send_message(embed=get_embed("Weekly Claimed", "+100 Levels", COLOR_PINK))
+    if not is_ready: return await interaction.response.send_message(embed=get_embed("Cooldown", f"You cannot claim yet.\n{time_left_text}", COLOR_BLACK), ephemeral=True)
+    update_profile(uid, {"levels": profile["levels"] + 200, "last_weekly": datetime.datetime.now().isoformat()})
+    await interaction.response.send_message(embed=get_embed("Weekly Claimed", "+200 Levels", COLOR_PINK))
 
 @client.tree.command(name="leaderboard", description="Top 10")
 @app_commands.guild_only()
@@ -447,34 +391,33 @@ async def on_voice_state_update(member, before, after):
 @client.event
 async def on_message(message):
     if message.author.bot: return
-    # XP
     profile = get_user_profile(message.author.id)
-    if profile["msg_count"] + 1 >= 25: update_profile(message.author.id, {"levels": profile["levels"] + 2, "msg_count": 0})
+    if profile["msg_count"] + 1 >= 25: update_profile(message.author.id, {"levels": profile["levels"] + 5, "msg_count": 0})
     else: update_profile(message.author.id, {"msg_count": profile["msg_count"] + 1})
 
-    # AI
     if message.channel.id == AI_CHANNEL_ID and not profile.get("blacklisted", False):
         if client.user in message.mentions or (message.reference and message.reference.resolved.author == client.user):
-            # Deduplication
             if processed_msgs.find_one({"_id": message.id}): return 
             processed_msgs.insert_one({"_id": message.id, "time": datetime.datetime.now()})
-
             try: await message.add_reaction("<a:Purple_Book:1445900280234512475>") 
             except: pass 
 
             async with message.channel.typing():
                 history = ai_memory.find_one({"_id": str(message.channel.id)})
                 history = history["history"] if history else []
-                raw_input = message.content.replace(f"<@{client.user.id}>", "").strip()
-                tagged_input = f"[User ID: {message.author.id}] {raw_input}"
+                tagged_input = f"[User ID: {message.author.id}] {message.content.replace(f'<@{client.user.id}>', '').strip()}"
                 
-                msgs = [{"role": "system", "content": MAKARIA_PROMPT}] + history[-10:] + [{"role": "user", "content": tagged_input}]
+                # Gemini History Format Conversion
+                gemini_hist = []
+                for msg in history[-10:]:
+                    role = "user" if msg["role"] == "user" else "model"
+                    gemini_hist.append({"role": role, "parts": [msg["content"]]})
                 
                 try:
-                    response = await asyncio.to_thread(lambda: client_ai.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=200))
-                    reply = response.choices[0].message.content
+                    chat = model.start_chat(history=gemini_hist)
+                    response = await asyncio.to_thread(chat.send_message, tagged_input)
+                    reply = response.text
                     if reply.startswith("[User ID:"): reply = reply.split("]", 1)[-1].strip()
-
                     await message.reply(reply)
                     history.extend([{"role": "user", "content": tagged_input}, {"role": "assistant", "content": reply}])
                     ai_memory.update_one({"_id": str(message.channel.id)}, {"$set": {"history": history[-20:]}}, upsert=True)
@@ -501,29 +444,15 @@ async def socials(interaction: discord.Interaction):
 async def daily_task():
     channel = client.get_channel(DAILY_CHANNEL_ID)
     if channel:
-        # Get unused messages
-        unused_msgs = list(daily_msgs_db.find({"used": False}))
+        unused = list(daily_msgs_db.find({"used": False}))
+        if not unused:
+            if daily_msgs_db.count_documents({}) == 0: return await channel.send("@everyone 🌅 **Good Morning!**")
+            daily_msgs_db.update_many({}, {"$set": {"used": False}})
+            unused = list(daily_msgs_db.find({"used": False}))
         
-        # Logic: If no unused messages exist, check if the DB is empty or just finished a cycle
-        if not unused_msgs:
-            total_msgs = daily_msgs_db.count_documents({})
-            if total_msgs == 0:
-                # DB is truly empty, send default
-                await channel.send("@everyone 🌅 **Good Morning!**")
-                return
-            else:
-                # Cycle finished, reset all to unused
-                daily_msgs_db.update_many({}, {"$set": {"used": False}})
-                unused_msgs = list(daily_msgs_db.find({"used": False}))
-        
-        # Pick random message from unused list
-        selected = random.choice(unused_msgs)
-        
-        # Send message
-        await channel.send(f"@everyone 🌅 **Good Morning!**\n\n✨ {selected['content']}")
-        
-        # Mark as used
-        daily_msgs_db.update_one({"_id": selected["_id"]}, {"$set": {"used": True}})
+        msg = random.choice(unused)
+        daily_msgs_db.update_one({"_id": msg["_id"]}, {"$set": {"used": True}})
+        await channel.send(f"@everyone 🌅 **Good Morning!**\n\n✨ {msg['content']}")
 
 keep_alive()
 client.run(DISCORD_TOKEN)
