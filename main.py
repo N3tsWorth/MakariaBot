@@ -35,6 +35,7 @@ cluster = MongoClient(MONGO_URL)
 db = cluster["MakariaBotDB"]
 user_data = db["users"]
 ai_memory = db["ai_memory"]
+processed_msgs = db["processed_messages"] # New collection to prevent double replies
 
 # ================= AI PROMPT =================
 MAKARIA_PROMPT = """
@@ -335,10 +336,17 @@ async def on_message(message):
     if profile["msg_count"] + 1 >= 25: update_profile(message.author.id, {"levels": profile["levels"] + 2, "msg_count": 0})
     else: update_profile(message.author.id, {"msg_count": profile["msg_count"] + 1})
 
-    # AI
+    # AI (WITH DEDUPLICATION FIX)
     if message.channel.id == AI_CHANNEL_ID and not profile.get("blacklisted", False):
         if client.user in message.mentions or (message.reference and message.reference.resolved.author == client.user):
-            # REACTION: 
+            # 1. CHECK IF PROCESSED ALREADY
+            if processed_msgs.find_one({"_id": message.id}):
+                return # Stop. This message was handled by another instance.
+            
+            # 2. MARK AS PROCESSED IMMEDIATELY
+            processed_msgs.insert_one({"_id": message.id, "time": datetime.datetime.now()})
+
+            # REACTION
             try:
                 await message.add_reaction("<a:Purple_Book:1445900280234512475>") 
             except: pass 
