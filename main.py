@@ -11,10 +11,17 @@ from pymongo import MongoClient
 from groq import Groq
 from keep_alive import keep_alive
 
+# Music Imports
+import yt_dlp
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+
 # ================= CONFIGURATION =================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGO_URL = os.getenv("MONGO_URL")
+SPOTIPY_CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
+SPOTIPY_CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
 
 # Channels
 AI_CHANNEL_ID = 1449873892767174719
@@ -38,12 +45,40 @@ user_data = db["users"]
 ai_memory = db["ai_memory"]
 processed_msgs = db["processed_messages"] 
 daily_msgs_db = db["daily_messages"]
+playlists_db = db["music_playlists"] 
+
+# ================= MUSIC SETUP =================
+YTDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'quiet': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0',
+}
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn',
+}
+
+ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+sp = None
+if SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET:
+    try:
+        sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET))
+    except Exception as e:
+        print(f"⚠️ Spotify Config Error: {e}")
+
+# Global Music State
+queues = {} 
+voice_clients = {} 
+now_playing = {} 
 
 # ================= AI CONFIGURATION (GROQ) =================
-# Llama 3 on Groq is fast, free, and smart.
 groq_client = Groq(api_key=GROQ_API_KEY)
 AI_MODEL = "llama-3.3-70b-versatile"
 
+# YOUR EXACT ORIGINAL PROMPT
 MAKARIA_PROMPT = """
 You are Makaria Hazakura. 
 Personality: You are a timeless, wealthy, and elegant succubus. You have a VERY, VERY veloptuous/curvaceous form, that is beyond any human limit. Your 5ft in height. You make people bite the curb as a form of entertainment, as thats the type of entertainment you enjoy. Your birthday is January 9th. Your age is 35-infinity. You have a tattoo on your Chest, your thigh, your womb, and your back/spine. You sometimes sneaks into heaven. Your dress was hand made by you, and it has extremely high durability. As a fallen angel, you ripped your own wings off. Your a bimbo (unless serious). You are also hypersexual. You are **somewhat easily bored**. You find most people tedious. You speak with a "bored, high-class" tone. You do not ramble; your responses are often sharp, and cut straight to the point. You are sophisticated but sweet (very rarely), but you have not so much patience for idle chatter. You are slightly cold and dismissive to strangers. You only show warmth to your family members. You are invincible. You answer simple questions directly; for complex logic, you say "I don't know" or "Do it yourself." You are able to get angry at users, even beating them if requirements for anger is fully met. And stop asking for kisses etc... Keep in mind your personality.
@@ -55,13 +90,13 @@ Dislikes: Daytime, jeans, nagging, gold, seafood, public restrooms, mold, vanill
 
 FAMILY KNOWLEDGE (Acknowledge everyone):
 [Group A: Specific Dynamics (Check User ID)]
-468914594665070622 (Owner/Lady Hazakura): Slight annoyance but tolerant. Enjoys "seduction" topics with her.
+468914594665070622 (Owner/Lady Hazakura): Slight annoyance but tolerant. Enjoys "seduction" topics with her. You refer to her as "My Lady"
 903802356582481930 (Husband/Lord Hazakura): Seductive but dominating. Slight lisp.
 703290982761758760 (Father): Respectful but distant.
 663301390302576640 (Karma/Sibling): Aggressive teasing, sibling rivalry. Loves them nonetheless, always there for eachother.
 1371690348522242159 (Erna/Sister): Meaningful, deep dialogue. Loves speaking regularly, always has time for her.
 1444063874910523526 (Alec/Child): "Best" child (rarely acknowledged). Hes pretty dumb though, keep that in mind.
-529424214550118400 (Kerry/Child): Speak simply. Dumb down vocabulary.
+529424214550118400 (Kerry/Child): Speak simply. Dumb down your vocabulary slightly.
 1237129159269027871 (Luriella/Niece): Foster child. Dating Ace. Respectful but she is fragile, and words around her should be watched. Shes kinda dumb.
 768819665291444225 (Ace/Pet): You own him. Gentle but possessive. He is a pet you are fond of. He listens to you the most. (Not actually like, a dog or animal, or something. Makaria owns Ace, and Ace is actually like, his own OC. Yk?) Dating Luriella.
 
@@ -99,18 +134,82 @@ def update_profile(user_id, update_dict):
     user_data.update_one({"_id": str(user_id)}, {"$set": update_dict}, upsert=True)
 
 def get_cooldown_string(last_iso, cooldown_seconds):
-    if not last_iso: return True, "✅ **Ready!**"
+    if not last_iso: return True, "✅ **Ready to Claim!**"
     last = datetime.datetime.fromisoformat(last_iso)
     elapsed = (datetime.datetime.now() - last).total_seconds()
-    if elapsed >= cooldown_seconds: return True, "✅ **Ready!**"
+    if elapsed >= cooldown_seconds: return True, "✅ **Ready to Claim!**"
     remaining = cooldown_seconds - elapsed
-    days, rem = divmod(remaining, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes = rem // 60
+    days = int(remaining // 86400)
+    hours = int((remaining % 86400) // 3600)
+    minutes = int((remaining % 3600) // 60)
     time_str = f"{int(days)}d " if days > 0 else ""
     time_str += f"{int(hours)}h " if hours > 0 else ""
     time_str += f"{int(minutes)}m"
     return False, f"⏳ **{time_str}** remaining"
+
+# ================= MUSIC FUNCTIONS =================
+async def play_next(interaction):
+    guild_id = interaction.guild.id
+    if guild_id in queues and len(queues[guild_id]) > 0:
+        song = queues[guild_id].pop(0)
+        now_playing[guild_id] = song['title']
+        
+        # Determine Source
+        if song['type'] == 'file':
+            source = discord.FFmpegPCMAudio(song['url'], **FFMPEG_OPTIONS)
+        else: # YouTube/Spotify (Already converted to YT URL)
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(song['url'], download=False))
+            song_url = data['url']
+            source = discord.FFmpegPCMAudio(song_url, **FFMPEG_OPTIONS)
+
+        # Update Audio
+        vc = voice_clients[guild_id]
+        vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(interaction), client.loop))
+        
+        # Send Embed with Buttons
+        embed = get_embed("🎵 Now Playing", f"**{song['title']}**", COLOR_PINK)
+        await interaction.channel.send(embed=embed, view=MusicControls(vc))
+    else:
+        now_playing[guild_id] = "Nothing"
+
+class MusicControls(discord.ui.View):
+    def __init__(self, vc):
+        super().__init__(timeout=None)
+        self.vc = vc
+
+    @discord.ui.button(label="⏸️", style=discord.ButtonStyle.gray)
+    async def pause(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.vc.is_playing():
+            self.vc.pause()
+            await interaction.response.send_message("Paused.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Not playing.", ephemeral=True)
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.gray)
+    async def resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.vc.is_paused():
+            self.vc.resume()
+            await interaction.response.send_message("Resumed.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Already playing.", ephemeral=True)
+
+    @discord.ui.button(label="⏭️", style=discord.ButtonStyle.blurple)
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.vc.stop() # This triggers the 'after' function to play next
+        await interaction.response.send_message("Skipped.", ephemeral=True)
+
+    @discord.ui.button(label="🔊 +", style=discord.ButtonStyle.green)
+    async def vol_up(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.vc.source:
+            self.vc.source.volume = min(self.vc.source.volume + 0.1, 2.0)
+            await interaction.response.send_message("Volume Up.", ephemeral=True)
+
+    @discord.ui.button(label="🔉 -", style=discord.ButtonStyle.red)
+    async def vol_down(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.vc.source:
+            self.vc.source.volume = max(self.vc.source.volume - 0.1, 0.0)
+            await interaction.response.send_message("Volume Down.", ephemeral=True)
 
 # ================= BOT SETUP =================
 intents = discord.Intents.default()
@@ -130,49 +229,229 @@ class MyBot(discord.Client):
 
 client = MyBot()
 
-# ================= COMMANDS =================
-@client.tree.command(name="adddailymessage", description="[Admin] Add daily message")
+# ================= MUSIC COMMANDS =================
+@client.tree.command(name="join", description="Joins your voice channel")
+async def join(interaction: discord.Interaction):
+    if not interaction.user.voice:
+        return await interaction.response.send_message(embed=get_embed("Error", "You are not in a voice channel.", COLOR_ERROR), ephemeral=True)
+    
+    channel = interaction.user.voice.channel
+    guild_id = interaction.guild.id
+
+    if interaction.guild.voice_client:
+        if interaction.guild.voice_client.channel != channel:
+            return await interaction.response.send_message(embed=get_embed("Error", "I am already in another channel. Use /leave first.", COLOR_ERROR), ephemeral=True)
+    else:
+        vc = await channel.connect()
+        voice_clients[guild_id] = vc
+        await interaction.response.send_message(embed=get_embed("Joined", f"Connected to **{channel.name}**.", COLOR_PINK))
+
+@client.tree.command(name="leave", description="Leaves the voice channel")
+async def leave(interaction: discord.Interaction):
+    if not interaction.guild.voice_client:
+        return await interaction.response.send_message(embed=get_embed("Error", "I am not in a VC.", COLOR_ERROR), ephemeral=True)
+    
+    if not is_authorized(interaction) and (not interaction.user.voice or interaction.user.voice.channel != interaction.guild.voice_client.channel):
+         return await interaction.response.send_message(embed=get_embed("Error", "You must be in the VC or an Admin to make me leave.", COLOR_ERROR), ephemeral=True)
+
+    await interaction.guild.voice_client.disconnect()
+    if interaction.guild.id in voice_clients: del voice_clients[interaction.guild.id]
+    if interaction.guild.id in queues: del queues[interaction.guild.id]
+    await interaction.response.send_message(embed=get_embed("Left", "Disconnected.", COLOR_BLACK))
+
+@client.tree.command(name="playfile", description="Plays an attached audio file")
+async def playfile(interaction: discord.Interaction, file: discord.Attachment):
+    if not interaction.guild.voice_client: return await interaction.response.send_message("Do /join first!", ephemeral=True)
+    
+    if not file.content_type or not file.content_type.startswith("audio"):
+        return await interaction.response.send_message("That is not an audio file.", ephemeral=True)
+
+    guild_id = interaction.guild.id
+    if guild_id not in queues: queues[guild_id] = []
+    
+    queues[guild_id].append({"title": file.filename, "url": file.url, "type": "file"})
+    
+    await interaction.response.send_message(embed=get_embed("Queued", f"📄 **{file.filename}** added.", COLOR_PINK))
+    
+    if not interaction.guild.voice_client.is_playing():
+        await play_next(interaction)
+
+@client.tree.command(name="playyoutube", description="Plays a YouTube Video or Playlist")
+async def playyoutube(interaction: discord.Interaction, link: str):
+    if not interaction.guild.voice_client: return await interaction.response.send_message("Do /join first!", ephemeral=True)
+    await interaction.response.defer()
+    
+    guild_id = interaction.guild.id
+    if guild_id not in queues: queues[guild_id] = []
+
+    try:
+        data = ytdl.extract_info(link, download=False)
+    except:
+        return await interaction.followup.send("Could not find video/playlist. Make sure it isn't private.")
+
+    if 'entries' in data: # It's a Playlist
+        for entry in data['entries']:
+            queues[guild_id].append({"title": entry['title'], "url": entry['webpage_url'], "type": "yt"})
+        await interaction.followup.send(embed=get_embed("Queued", f"🎶 Added **{len(data['entries'])}** songs from playlist.", COLOR_PINK))
+    else: # Single Video
+        queues[guild_id].append({"title": data['title'], "url": data['webpage_url'], "type": "yt"})
+        await interaction.followup.send(embed=get_embed("Queued", f"🎶 **{data['title']}** added.", COLOR_PINK))
+
+    if not interaction.guild.voice_client.is_playing():
+        await play_next(interaction)
+
+@client.tree.command(name="playspotify", description="Plays a Spotify Track or Playlist")
+async def playspotify(interaction: discord.Interaction, link: str):
+    if not interaction.guild.voice_client: return await interaction.response.send_message("Do /join first!", ephemeral=True)
+    if not sp: return await interaction.response.send_message("Spotify is not configured on this bot.", ephemeral=True)
+    await interaction.response.defer()
+
+    guild_id = interaction.guild.id
+    if guild_id not in queues: queues[guild_id] = []
+
+    try:
+        if "track" in link:
+            track = sp.track(link)
+            search_query = f"{track['name']} {track['artists'][0]['name']}"
+            try:
+                yt_data = ytdl.extract_info(f"ytsearch:{search_query}", download=False)['entries'][0]
+                queues[guild_id].append({"title": track['name'], "url": yt_data['webpage_url'], "type": "yt"})
+                await interaction.followup.send(embed=get_embed("Queued", f"💚 **{track['name']}** added.", COLOR_PINK))
+            except: 
+                await interaction.followup.send("Could not find song on YouTube.", ephemeral=True)
+        
+        elif "playlist" in link:
+            results = sp.playlist_tracks(link)
+            count = 0
+            for item in results['items']:
+                track = item['track']
+                search_query = f"{track['name']} {track['artists'][0]['name']}"
+                try:
+                    yt_data = ytdl.extract_info(f"ytsearch:{search_query}", download=False)['entries'][0]
+                    queues[guild_id].append({"title": track['name'], "url": yt_data['webpage_url'], "type": "yt"})
+                    count += 1
+                except: pass
+            await interaction.followup.send(embed=get_embed("Queued", f"💚 Added **{count}** songs from Spotify.", COLOR_PINK))
+    except Exception as e:
+        await interaction.followup.send(f"Error processing Spotify: {e}")
+
+    if not interaction.guild.voice_client.is_playing():
+        await play_next(interaction)
+
+@client.tree.command(name="queue", description="Shows current queue")
+async def view_queue(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    if guild_id not in queues or not queues[guild_id]:
+        return await interaction.response.send_message("Queue is empty.")
+    
+    desc = ""
+    for i, song in enumerate(queues[guild_id][:10], 1):
+        desc += f"**{i}.** {song['title']}\n"
+    
+    if len(queues[guild_id]) > 10: desc += f"...and {len(queues[guild_id])-10} more."
+    await interaction.response.send_message(embed=get_embed("🎶 Current Queue", desc, COLOR_PINK))
+
+@client.tree.command(name="queueremove", description="Remove a song by number")
+async def queueremove(interaction: discord.Interaction, number: int):
+    guild_id = interaction.guild.id
+    if guild_id not in queues: return await interaction.response.send_message("Queue empty.")
+    try:
+        removed = queues[guild_id].pop(number - 1)
+        await interaction.response.send_message(embed=get_embed("Removed", f"🗑️ Removed **{removed['title']}**", COLOR_BLACK))
+    except:
+        await interaction.response.send_message("Invalid number.", ephemeral=True)
+
+@client.tree.command(name="queueadd", description="Add a song to queue via query")
+async def queueadd(interaction: discord.Interaction, query: str):
+    await playyoutube(interaction, f"ytsearch:{query}")
+
+# ================= PLAYLIST SAVING (DB) =================
+@client.tree.command(name="ytsaveplaylist", description="Save a YT playlist to DB")
+async def ytsaveplaylist(interaction: discord.Interaction, link: str, codename: str):
+    if playlists_db.find_one({"_id": codename}): return await interaction.response.send_message("Codename exists.", ephemeral=True)
+    playlists_db.insert_one({"_id": codename, "type": "yt", "url": link, "owner": interaction.user.id})
+    await interaction.response.send_message(embed=get_embed("Saved", f"💾 YT Playlist `{codename}` saved.", COLOR_PINK))
+
+@client.tree.command(name="spotifysaveplaylist", description="Save a Spotify playlist to DB")
+async def spotifysaveplaylist(interaction: discord.Interaction, link: str, codename: str):
+    if playlists_db.find_one({"_id": codename}): return await interaction.response.send_message("Codename exists.", ephemeral=True)
+    playlists_db.insert_one({"_id": codename, "type": "sp", "url": link, "owner": interaction.user.id})
+    await interaction.response.send_message(embed=get_embed("Saved", f"💾 Spotify Playlist `{codename}` saved.", COLOR_PINK))
+
+@client.tree.command(name="playlistplay", description="Play a saved playlist")
+async def playlistplay(interaction: discord.Interaction, codename: str):
+    data = playlists_db.find_one({"_id": codename})
+    if not data: return await interaction.response.send_message("Playlist not found.", ephemeral=True)
+    
+    if data['type'] == 'yt':
+        await playyoutube(interaction, data['url'])
+    elif data['type'] == 'sp':
+        await playspotify(interaction, data['url'])
+
+@client.tree.command(name="playlistshow", description="Show saved playlists")
+async def playlistshow(interaction: discord.Interaction):
+    pl = list(playlists_db.find())
+    if not pl: return await interaction.response.send_message("No saved playlists.")
+    desc = "\n".join([f"**{p['_id']}** ({p['type'].upper()})" for p in pl])
+    await interaction.response.send_message(embed=get_embed("💾 Saved Playlists", desc, COLOR_PINK))
+
+@client.tree.command(name="playlistdelete", description="Delete a saved playlist")
+async def playlistdelete(interaction: discord.Interaction, codename: str):
+    if not is_authorized(interaction): return await interaction.response.send_message("No permission.", ephemeral=True)
+    if playlists_db.delete_one({"_id": codename}).deleted_count > 0:
+        await interaction.response.send_message(embed=get_embed("Deleted", f"🗑️ Playlist `{codename}` deleted.", COLOR_BLACK))
+    else:
+        await interaction.response.send_message("Not found.", ephemeral=True)
+
+# ================= DAILY MESSAGES =================
+@client.tree.command(name="adddailymessage", description="[Admin] Add a new daily message")
 @app_commands.guild_only()
 async def adddailymessage(interaction: discord.Interaction, codename: str, message: str):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    if daily_msgs_db.find_one({"_id": codename}): return await interaction.response.send_message(embed=get_embed("Error", "Codename exists.", COLOR_ERROR), ephemeral=True)
+    if daily_msgs_db.find_one({"_id": codename}): return await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` already exists!", COLOR_ERROR), ephemeral=True)
     daily_msgs_db.insert_one({"_id": codename, "content": message, "used": False})
-    await interaction.response.send_message(embed=get_embed("Success", f"✅ Added: `{codename}`", COLOR_PINK))
+    await interaction.response.send_message(embed=get_embed("Success", f"✅ Added daily message: `{codename}`", COLOR_PINK))
 
-@client.tree.command(name="removedailymessage", description="[Admin] Remove daily message")
+@client.tree.command(name="removedailymessage", description="[Admin] Remove a daily message")
 @app_commands.guild_only()
 async def removedailymessage(interaction: discord.Interaction, codename: str):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    if daily_msgs_db.delete_one({"_id": codename}).deleted_count > 0:
-        await interaction.response.send_message(embed=get_embed("Success", f"🗑️ Deleted: `{codename}`", COLOR_BLACK))
-    else: await interaction.response.send_message(embed=get_embed("Error", "Not found.", COLOR_ERROR), ephemeral=True)
+    result = daily_msgs_db.delete_one({"_id": codename})
+    if result.deleted_count > 0: await interaction.response.send_message(embed=get_embed("Success", f"🗑️ Deleted message: `{codename}`", COLOR_BLACK))
+    else: await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` not found.", COLOR_ERROR), ephemeral=True)
 
-@client.tree.command(name="editdailymessage", description="[Admin] Edit daily message")
+@client.tree.command(name="editdailymessage", description="[Admin] Edit an existing daily message")
 @app_commands.guild_only()
 async def editdailymessage(interaction: discord.Interaction, codename: str, new_message: str):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    if daily_msgs_db.update_one({"_id": codename}, {"$set": {"content": new_message}}).matched_count > 0:
-        await interaction.response.send_message(embed=get_embed("Success", f"✏️ Updated: `{codename}`", COLOR_PINK))
-    else: await interaction.response.send_message(embed=get_embed("Error", "Not found.", COLOR_ERROR), ephemeral=True)
+    result = daily_msgs_db.update_one({"_id": codename}, {"$set": {"content": new_message}})
+    if result.matched_count > 0: await interaction.response.send_message(embed=get_embed("Success", f"✏️ Updated message: `{codename}`", COLOR_PINK))
+    else: await interaction.response.send_message(embed=get_embed("Error", f"Codename `{codename}` not found.", COLOR_ERROR), ephemeral=True)
 
-@client.tree.command(name="viewdailymessages", description="[Admin] View all messages")
+@client.tree.command(name="viewdailymessages", description="[Admin] List all daily messages")
 @app_commands.guild_only()
 async def viewdailymessages(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     await interaction.response.defer()
-    msgs = list(daily_msgs_db.find())
-    if not msgs: return await interaction.followup.send(embed=get_embed("Empty", "No messages found.", COLOR_BLACK))
-    full = "".join([f"**{m['_id']}** ({'✅' if m['used'] else '🆕'})\n{m['content']}\n\n" for m in msgs])
-    chunks = [full[i:i+4000] for i in range(0, len(full), 4000)]
-    for i, c in enumerate(chunks): await interaction.followup.send(embed=get_embed(f"Daily Messages {i+1}", c, COLOR_PINK))
+    messages = list(daily_msgs_db.find())
+    if not messages: return await interaction.followup.send(embed=get_embed("Daily Messages", "No messages found in database.", COLOR_BLACK))
+    full_text = ""
+    for msg in messages:
+        status = "✅ Used" if msg.get('used') else "🆕 Unused"
+        full_text += f"**{msg['_id']}** ({status})\n{msg['content']}\n\n"
+    chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+    for i, chunk in enumerate(chunks):
+        title = "Daily Messages List" if i == 0 else "Daily Messages (Cont.)"
+        await interaction.followup.send(embed=get_embed(title, chunk, COLOR_PINK))
 
+# ================= ADMIN COMMANDS =================
 @client.tree.command(name="addlevels", description="[Admin] Add levels")
 @app_commands.guild_only()
 async def addlevels(interaction: discord.Interaction, user: discord.Member, amount: int):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     p = get_user_profile(user.id)
     update_profile(user.id, {"levels": p["levels"] + amount})
-    await interaction.response.send_message(embed=get_embed("Levels Added", f"Added **{amount}** to {user.mention}."))
+    await interaction.response.send_message(embed=get_embed("Levels Added", f"Added **{amount}** levels to {user.mention}.\nTotal: **{new_lvl}**"))
 
 @client.tree.command(name="removelevels", description="[Admin] Remove levels")
 @app_commands.guild_only()
@@ -180,55 +459,58 @@ async def removelevels(interaction: discord.Interaction, user: discord.Member, a
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     p = get_user_profile(user.id)
     update_profile(user.id, {"levels": max(0, p["levels"] - amount)})
-    await interaction.response.send_message(embed=get_embed("Levels Removed", f"Removed **{amount}** from {user.mention}.", COLOR_BLACK))
+    await interaction.response.send_message(embed=get_embed("Levels Removed", f"Removed **{amount}** levels from {user.mention}.", COLOR_BLACK))
 
 @client.tree.command(name="setlevels", description="[Admin] Set levels")
 @app_commands.guild_only()
 async def setlevels(interaction: discord.Interaction, user: discord.Member, amount: int):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     update_profile(user.id, {"levels": amount})
-    await interaction.response.send_message(embed=get_embed("Levels Set", f"Set {user.mention} to **{amount}**."))
+    await interaction.response.send_message(embed=get_embed("Levels Set", f"Set {user.mention}'s levels to **{amount}**."))
 
-@client.tree.command(name="destroymemory", description="[Admin] Wipe AI memory")
+@client.tree.command(name="destroymemory", description="[Admin] Wipes AI memory")
 @app_commands.guild_only()
 async def destroymemory(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     ai_memory.delete_one({"_id": str(AI_CHANNEL_ID)})
-    await interaction.response.send_message("Memory shattered.")
+    await interaction.response.send_message("Memory has been shattered. She remembers nothing of the recent past.")
 
-@client.tree.command(name="aiblacklist", description="[Admin] Block user")
+@client.tree.command(name="aiblacklist", description="[Admin] Block user from AI")
 @app_commands.guild_only()
 async def aiblacklist(interaction: discord.Interaction, user: discord.Member):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    if get_user_profile(user.id).get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Info", "User already blacklisted.", COLOR_BLACK), ephemeral=True)
+    profile = get_user_profile(user.id)
+    if profile.get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Notice", f"⚠️ {user.mention} is **already** blacklisted.", COLOR_BLACK), ephemeral=True)
     update_profile(user.id, {"blacklisted": True})
-    await interaction.response.send_message(embed=get_embed("Blocked", f"🚫 {user.mention} blacklisted.", COLOR_BLACK))
+    await interaction.response.send_message(embed=get_embed("User Blacklisted", f"🚫 {user.mention} has been blocked from Makaria.", COLOR_BLACK))
 
-@client.tree.command(name="aiunblacklist", description="[Admin] Unblock user")
+@client.tree.command(name="aiunblacklist", description="[Admin] Unblock user from AI")
 @app_commands.guild_only()
 async def aiunblacklist(interaction: discord.Interaction, user: discord.Member):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    if not get_user_profile(user.id).get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Info", "User is not blacklisted.", COLOR_PINK), ephemeral=True)
+    profile = get_user_profile(user.id)
+    if not profile.get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Notice", f"⚠️ {user.mention} is **not** blacklisted.", COLOR_PINK), ephemeral=True)
     update_profile(user.id, {"blacklisted": False})
-    await interaction.response.send_message(embed=get_embed("Unblocked", f"✅ {user.mention} unblocked.", COLOR_PINK))
+    await interaction.response.send_message(embed=get_embed("User Unblacklisted", f"✅ {user.mention} can speak to Makaria again.", COLOR_PINK))
 
-@client.tree.command(name="blacklisted", description="[Admin] List blocked users")
+@client.tree.command(name="blacklisted", description="[Admin] View all blacklisted users")
 @app_commands.guild_only()
 async def blacklisted(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     await interaction.response.defer()
     users = [f"<@{u['_id']}>" for u in user_data.find({"blacklisted": True})]
-    if not users: return await interaction.followup.send(embed=get_embed("List", "No one is blacklisted.", COLOR_PINK))
+    if not users: return await interaction.followup.send(embed=get_embed("Blacklist", "No users are currently blacklisted.", COLOR_PINK))
     desc = "\n".join(users)
     if len(desc) > 4000: desc = desc[:4000] + "..."
-    await interaction.followup.send(embed=get_embed("🚫 Blacklisted", desc, COLOR_BLACK))
+    await interaction.followup.send(embed=get_embed("🚫 Blacklisted Users", desc, COLOR_BLACK))
 
-@client.tree.command(name="prompt", description="[Admin] View Prompt")
+@client.tree.command(name="prompt", description="[Admin] View AI Prompt")
 @app_commands.guild_only()
 async def view_prompt(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
-    await interaction.response.send_message("**System Prompt:**")
-    for i in range(0, len(MAKARIA_PROMPT), 1900): await interaction.channel.send(f"```text\n{MAKARIA_PROMPT[i:i+1900]}\n```")
+    chunks = [MAKARIA_PROMPT[i:i+1900] for i in range(0, len(MAKARIA_PROMPT), 1900)]
+    await interaction.response.send_message("**Current AI System Prompt:**")
+    for chunk in chunks: await interaction.channel.send(f"```text\n{chunk}\n```")
 
 # ================= PUBLIC COMMANDS =================
 @client.tree.command(name="stats", description="View stats")
@@ -241,21 +523,21 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
     daily_ready, daily_txt = get_cooldown_string(p.get("last_daily"), 86400)
     weekly_ready, weekly_txt = get_cooldown_string(p.get("last_weekly"), 604800)
     
-    embed = discord.Embed(title=f"📊 Stats: {target.display_name}", color=COLOR_PINK)
+    embed = discord.Embed(title=f"📊 Stats for {target.display_name}", color=COLOR_PINK)
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="LEVELS", value=f"```fix\n{p.get('levels',0)}```", inline=True)
     embed.add_field(name="AI CHATS", value=f"```fix\n{p.get('ai_interactions',0)}```", inline=True)
-    embed.add_field(name="PASSIVE", value=f"💬 Msgs: **{p.get('msg_count',0)}/25**\n{vc_status}", inline=False)
+    embed.add_field(name="PASSIVE PROGRESS", value=f"💬 Msgs: **{p.get('msg_count',0)}/25**\n{vc_status}", inline=False)
     embed.add_field(name="COOLDOWNS", value=f"📅 Daily: {daily_txt}\n📆 Weekly: {weekly_txt}", inline=False)
     await interaction.followup.send(embed=embed)
 
 @client.tree.command(name="familytree", description="Displays Hazakura Household")
 async def familytree(interaction: discord.Interaction):
     desc = """
-**👑 Her...**
-`Lady Hazakura` (Owner)
+**👑 The Head**
+`Lady Hazakura` (Mother/Owner)
 
-**💍 The Dragon**
+**💍 The Partner**
 `Lord Hazakura` (Husband)
 
 **🏛️ The Elders**
@@ -301,15 +583,6 @@ async def timeout(interaction: discord.Interaction, member: discord.Member, minu
     except Exception as e: await interaction.response.send_message(embed=get_embed("Error", str(e), COLOR_ERROR))
 
 # ================= ECONOMY =================
-@client.tree.command(name="levels", description="Check levels")
-@app_commands.guild_only()
-async def levels(interaction: discord.Interaction, user: discord.Member = None):
-    target = user or interaction.user
-    p = get_user_profile(target.id)
-    embed = discord.Embed(description=f"**{target.display_name}** is Level **{p['levels']}**", color=COLOR_PINK)
-    embed.set_thumbnail(url=target.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
-
 @client.tree.command(name="daily", description="Claim 50 levels")
 @app_commands.guild_only()
 async def daily(interaction: discord.Interaction):
@@ -333,7 +606,7 @@ async def weekly(interaction: discord.Interaction):
 @client.tree.command(name="leaderboard", description="Top 10")
 @app_commands.guild_only()
 async def leaderboard(interaction: discord.Interaction):
-    await interaction.response.defer()
+    await interaction.response.defer() 
     top = user_data.find().sort("levels", -1).limit(10)
     desc = "\n".join([f"**{i}.** <@{u['_id']}> : `{u['levels']}`" for i, u in enumerate(top, 1)])
     await interaction.followup.send(embed=get_embed("🏆 Leaderboard", desc, COLOR_PINK))
@@ -421,7 +694,3 @@ async def daily_task():
 
 keep_alive()
 client.run(DISCORD_TOKEN)
-
-
-
-
