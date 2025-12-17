@@ -3,5 +3,3 @@ flask
 pymongo
 groq
 python-dotenv
-git+https://github.com/yt-dlp/yt-dlp.git@master
-PyNaCl
