@@ -4,5 +4,4 @@ pymongo
 groq
 python-dotenv
 yt-dlp
-spotipy
 PyNaCl
