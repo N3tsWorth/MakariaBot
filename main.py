@@ -44,7 +44,7 @@ daily_msgs_db = db["daily_messages"]
 playlists_db = db["music_playlists"] 
 
 # ================= MUSIC SETUP =================
-# Headers added to prevent "Could not find video" errors
+# UPDATED OPTIONS TO BYPASS "SIGN IN" ERROR
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
@@ -52,8 +52,11 @@ YTDL_OPTIONS = {
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
     'nocheckcertificate': True,
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:94.0) Gecko/20100101 Firefox/94.0'
+    # Using Android client often bypasses the "Sign in" check
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web']
+        }
     }
 }
 
@@ -67,6 +70,10 @@ if os.path.isfile("./ffmpeg"):
     FFMPEG_EXE = "./ffmpeg"
 else:
     FFMPEG_EXE = "ffmpeg"
+
+# Add Node.js to path if installed via script (Fixes JS Runtime Error)
+if os.path.isdir("./node_install/bin"):
+    os.environ["PATH"] += os.pathsep + os.path.abspath("./node_install/bin")
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
@@ -154,7 +161,6 @@ async def play_next(interaction):
         song = queues[guild_id].pop(0)
         now_playing[guild_id] = song['title']
         
-        # Determine Source
         try:
             if song['type'] == 'file':
                 source = discord.FFmpegPCMAudio(song['url'], executable=FFMPEG_EXE, **FFMPEG_OPTIONS)
@@ -162,7 +168,6 @@ async def play_next(interaction):
                 loop = asyncio.get_event_loop()
                 data = await loop.run_in_executor(None, lambda: ytdl.extract_info(song['url'], download=False))
                 
-                # Get best audio URL
                 if 'url' in data:
                     song_stream_url = data['url']
                 else:
@@ -170,15 +175,12 @@ async def play_next(interaction):
 
                 source = discord.FFmpegPCMAudio(song_stream_url, executable=FFMPEG_EXE, **FFMPEG_OPTIONS)
 
-            # Volume Transformer (Fixes buttons)
             source = discord.PCMVolumeTransformer(source)
             source.volume = 0.5 
 
-            # Update Audio
             vc = voice_clients[guild_id]
             vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(interaction), client.loop))
             
-            # Send Embed with Buttons
             embed = get_embed("🎵 Now Playing", f"**{song['title']}**", COLOR_PINK)
             await interaction.channel.send(embed=embed, view=MusicControls(vc))
         except Exception as e:
@@ -243,8 +245,8 @@ class MyBot(discord.Client):
 
 client = MyBot()
 
-# ================= MUSIC COMMANDS =================
-@client.tree.command(name="join", description="Joins your voice channel")
+# ================= COMMANDS =================
+@client.tree.command(name="join", description="Joins your voice channel (Deafened)")
 async def join(interaction: discord.Interaction):
     if not interaction.user.voice:
         return await interaction.response.send_message(embed=get_embed("Error", "You are not in a voice channel.", COLOR_ERROR), ephemeral=True)
@@ -256,9 +258,10 @@ async def join(interaction: discord.Interaction):
         if interaction.guild.voice_client.channel != channel:
             return await interaction.response.send_message(embed=get_embed("Error", "I am already in another channel. Use /leave first.", COLOR_ERROR), ephemeral=True)
     else:
-        vc = await channel.connect()
+        # Join, then Self-Deafen
+        vc = await channel.connect(self_deaf=True)
         voice_clients[guild_id] = vc
-        await interaction.response.send_message(embed=get_embed("Joined", f"Connected to **{channel.name}**.", COLOR_PINK))
+        await interaction.response.send_message(embed=get_embed("Joined", f"Connected to **{channel.name}** (Deafened).", COLOR_PINK))
 
 @client.tree.command(name="leave", description="Leaves the voice channel")
 async def leave(interaction: discord.Interaction):
@@ -298,7 +301,6 @@ async def playyoutube(interaction: discord.Interaction, link: str):
     guild_id = interaction.guild.id
     if guild_id not in queues: queues[guild_id] = []
 
-    # Logic: Is it a Link or a Search?
     if not link.startswith("http"):
         link = f"ytsearch:{link}"
 
@@ -307,14 +309,11 @@ async def playyoutube(interaction: discord.Interaction, link: str):
     except Exception as e:
         return await interaction.followup.send(f"Could not find video. {e}")
 
-    # Handle Search Results
     if 'entries' in data:
-        # If it was a search (ytsearch:), take the first result
         if link.startswith("ytsearch:"):
             data = data['entries'][0]
             queues[guild_id].append({"title": data['title'], "url": data['webpage_url'], "type": "yt"})
             await interaction.followup.send(embed=get_embed("Queued", f"🎶 **{data['title']}** added.", COLOR_PINK))
-        # If it was a playlist link
         else:
             count = 0
             for entry in data['entries']:
@@ -322,7 +321,7 @@ async def playyoutube(interaction: discord.Interaction, link: str):
                     queues[guild_id].append({"title": entry['title'], "url": entry['webpage_url'], "type": "yt"})
                     count += 1
             await interaction.followup.send(embed=get_embed("Queued", f"🎶 Added **{count}** songs from playlist.", COLOR_PINK))
-    else: # Direct Video Link
+    else: 
         queues[guild_id].append({"title": data['title'], "url": data['webpage_url'], "type": "yt"})
         await interaction.followup.send(embed=get_embed("Queued", f"🎶 **{data['title']}** added.", COLOR_PINK))
 
@@ -605,6 +604,7 @@ async def on_message(message):
                 history = history["history"] if history else []
                 tagged_input = f"[User ID: {message.author.id}] {message.content.replace(f'<@{client.user.id}>', '').strip()}"
                 
+                # --- GROQ API CALL ---
                 msgs = [{"role": "system", "content": MAKARIA_PROMPT}] + history[-10:] + [{"role": "user", "content": tagged_input}]
                 
                 try:
@@ -616,6 +616,7 @@ async def on_message(message):
                     )
                     reply = response.choices[0].message.content
                     
+                    # CLEANER (Anti-Thinking & Anti-ID)
                     reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.DOTALL)
                     reply = re.sub(r"^\[User ID: \d+\]\s*", "", reply)
                     
