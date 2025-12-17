@@ -11,17 +11,13 @@ from pymongo import MongoClient
 from groq import Groq
 from keep_alive import keep_alive
 
-# Music Imports
+# Music Imports (No Spotipy)
 import yt_dlp
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
 
 # ================= CONFIGURATION =================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGO_URL = os.getenv("MONGO_URL")
-SPOTIPY_CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
-SPOTIPY_CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
 
 # Channels
 AI_CHANNEL_ID = 1449873892767174719
@@ -48,12 +44,12 @@ daily_msgs_db = db["daily_messages"]
 playlists_db = db["music_playlists"] 
 
 # ================= MUSIC SETUP =================
-# We add Headers here to trick YouTube into thinking we are a real Browser, not a Bot.
+# Headers added to prevent "Could not find video" errors
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
     'quiet': True,
-    'default_search': 'ytsearch', # Auto-search if text is not a link
+    'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
     'nocheckcertificate': True,
     'http_headers': {
@@ -61,26 +57,18 @@ YTDL_OPTIONS = {
     }
 }
 
-# FFmpeg needs to reconnect if connection drops
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
 }
 
-# Auto-detect FFmpeg (From the render-build.sh)
+# Auto-detect FFmpeg from render-build.sh
 if os.path.isfile("./ffmpeg"):
     FFMPEG_EXE = "./ffmpeg"
 else:
     FFMPEG_EXE = "ffmpeg"
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
-
-sp = None
-if SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET:
-    try:
-        sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET))
-    except Exception as e:
-        print(f"⚠️ Spotify Config Error: {e}")
 
 # Global Music State
 queues = {} 
@@ -169,27 +157,22 @@ async def play_next(interaction):
         # Determine Source
         try:
             if song['type'] == 'file':
-                # Direct file playback
                 source = discord.FFmpegPCMAudio(song['url'], executable=FFMPEG_EXE, **FFMPEG_OPTIONS)
-            else: 
-                # YouTube/Spotify (Already converted to YT URL)
-                # We need to extract the actual audio stream URL from the video link
+            else: # YouTube
                 loop = asyncio.get_event_loop()
                 data = await loop.run_in_executor(None, lambda: ytdl.extract_info(song['url'], download=False))
                 
-                # Check for formats
+                # Get best audio URL
                 if 'url' in data:
                     song_stream_url = data['url']
                 else:
-                    # Sometimes yt-dlp returns a list of formats, we need the best audio
                     song_stream_url = data['entries'][0]['url'] if 'entries' in data else data.get('url')
 
                 source = discord.FFmpegPCMAudio(song_stream_url, executable=FFMPEG_EXE, **FFMPEG_OPTIONS)
 
-            # WRAP IN TRANSFORMER FOR VOLUME CONTROL
-            # This fixes the "Volume buttons don't work" issue
+            # Volume Transformer (Fixes buttons)
             source = discord.PCMVolumeTransformer(source)
-            source.volume = 0.5 # Default to 50% volume
+            source.volume = 0.5 
 
             # Update Audio
             vc = voice_clients[guild_id]
@@ -200,7 +183,7 @@ async def play_next(interaction):
             await interaction.channel.send(embed=embed, view=MusicControls(vc))
         except Exception as e:
             await interaction.channel.send(f"⚠️ Error playing **{song['title']}**: {e}")
-            await play_next(interaction) # Skip broken song
+            await play_next(interaction)
     else:
         now_playing[guild_id] = "Nothing"
 
@@ -227,7 +210,7 @@ class MusicControls(discord.ui.View):
 
     @discord.ui.button(label="⏭️", style=discord.ButtonStyle.blurple)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.vc.stop() # This triggers the 'after' function to play next
+        self.vc.stop()
         await interaction.response.send_message("Skipped.", ephemeral=True)
 
     @discord.ui.button(label="🔊 +", style=discord.ButtonStyle.green)
@@ -294,7 +277,6 @@ async def leave(interaction: discord.Interaction):
 async def playfile(interaction: discord.Interaction, file: discord.Attachment):
     if not interaction.guild.voice_client: return await interaction.response.send_message("Do /join first!", ephemeral=True)
     
-    # Check if it is actually audio
     if not file.content_type or not file.content_type.startswith("audio"):
         return await interaction.response.send_message("That is not an audio file (mp3/wav/ogg).", ephemeral=True)
 
@@ -323,7 +305,7 @@ async def playyoutube(interaction: discord.Interaction, link: str):
     try:
         data = ytdl.extract_info(link, download=False)
     except Exception as e:
-        return await interaction.followup.send(f"Could not find video. If it's age-restricted, I cannot play it. ({e})")
+        return await interaction.followup.send(f"Could not find video. {e}")
 
     # Handle Search Results
     if 'entries' in data:
@@ -336,62 +318,13 @@ async def playyoutube(interaction: discord.Interaction, link: str):
         else:
             count = 0
             for entry in data['entries']:
-                if entry: # Filter out None entries (deleted videos)
+                if entry: 
                     queues[guild_id].append({"title": entry['title'], "url": entry['webpage_url'], "type": "yt"})
                     count += 1
             await interaction.followup.send(embed=get_embed("Queued", f"🎶 Added **{count}** songs from playlist.", COLOR_PINK))
     else: # Direct Video Link
         queues[guild_id].append({"title": data['title'], "url": data['webpage_url'], "type": "yt"})
         await interaction.followup.send(embed=get_embed("Queued", f"🎶 **{data['title']}** added.", COLOR_PINK))
-
-    if not interaction.guild.voice_client.is_playing():
-        await play_next(interaction)
-
-@client.tree.command(name="playspotify", description="Plays a Spotify Track or Playlist")
-async def playspotify(interaction: discord.Interaction, link: str):
-    if not interaction.guild.voice_client: return await interaction.response.send_message("Do /join first!", ephemeral=True)
-    if not sp: return await interaction.response.send_message("Spotify is not configured on this bot.", ephemeral=True)
-    await interaction.response.defer()
-
-    guild_id = interaction.guild.id
-    if guild_id not in queues: queues[guild_id] = []
-
-    try:
-        if "track" in link:
-            track = sp.track(link)
-            # We search YT for "Artist - Song Name"
-            search_query = f"{track['artists'][0]['name']} - {track['name']}"
-            try:
-                # We simply queue the SEARCH TERM with 'ytsearch:' prefix
-                # This prevents looking it up NOW (which is slow) and looks it up when it Plays (better)
-                # But to get the title for the embed, we assume the Spotify title is correct.
-                # NOTE: For the 'play_next' function to work, we need a URL. 
-                # So we DO need to resolve it here for compatibility with existing system.
-                yt_data = ytdl.extract_info(f"ytsearch:{search_query}", download=False)['entries'][0]
-                
-                queues[guild_id].append({"title": track['name'], "url": yt_data['webpage_url'], "type": "yt"})
-                await interaction.followup.send(embed=get_embed("Queued", f"💚 **{track['name']}** added (via YouTube).", COLOR_PINK))
-            except: 
-                await interaction.followup.send("Could not find song on YouTube.", ephemeral=True)
-        
-        elif "playlist" in link:
-            results = sp.playlist_tracks(link)
-            count = 0
-            for item in results['items']:
-                track = item['track']
-                search_query = f"{track['artists'][0]['name']} - {track['name']}"
-                # Here we are skipping the heavy extraction to save time.
-                # We can cheat by pushing a 'fake' yt entry that triggers a search later?
-                # For stability, let's just resolve the first 5 and warn the user it takes time?
-                # BETTER: Just add them.
-                try:
-                    yt_data = ytdl.extract_info(f"ytsearch:{search_query}", download=False)['entries'][0]
-                    queues[guild_id].append({"title": track['name'], "url": yt_data['webpage_url'], "type": "yt"})
-                    count += 1
-                except: pass
-            await interaction.followup.send(embed=get_embed("Queued", f"💚 Added **{count}** songs from Spotify.", COLOR_PINK))
-    except Exception as e:
-        await interaction.followup.send(f"Error processing Spotify: {e}")
 
     if not interaction.guild.voice_client.is_playing():
         await play_next(interaction)
@@ -421,7 +354,7 @@ async def queueremove(interaction: discord.Interaction, number: int):
 
 @client.tree.command(name="queueadd", description="Add a song to queue via query")
 async def queueadd(interaction: discord.Interaction, query: str):
-    await playyoutube(interaction, query)
+    await playyoutube(interaction, f"ytsearch:{query}")
 
 # ================= PLAYLIST SAVING (DB) =================
 @client.tree.command(name="ytsaveplaylist", description="Save a YT playlist to DB")
@@ -430,12 +363,6 @@ async def ytsaveplaylist(interaction: discord.Interaction, link: str, codename: 
     playlists_db.insert_one({"_id": codename, "type": "yt", "url": link, "owner": interaction.user.id})
     await interaction.response.send_message(embed=get_embed("Saved", f"💾 YT Playlist `{codename}` saved.", COLOR_PINK))
 
-@client.tree.command(name="spotifysaveplaylist", description="Save a Spotify playlist to DB")
-async def spotifysaveplaylist(interaction: discord.Interaction, link: str, codename: str):
-    if playlists_db.find_one({"_id": codename}): return await interaction.response.send_message("Codename exists.", ephemeral=True)
-    playlists_db.insert_one({"_id": codename, "type": "sp", "url": link, "owner": interaction.user.id})
-    await interaction.response.send_message(embed=get_embed("Saved", f"💾 Spotify Playlist `{codename}` saved.", COLOR_PINK))
-
 @client.tree.command(name="playlistplay", description="Play a saved playlist")
 async def playlistplay(interaction: discord.Interaction, codename: str):
     data = playlists_db.find_one({"_id": codename})
@@ -443,14 +370,12 @@ async def playlistplay(interaction: discord.Interaction, codename: str):
     
     if data['type'] == 'yt':
         await playyoutube(interaction, data['url'])
-    elif data['type'] == 'sp':
-        await playspotify(interaction, data['url'])
 
 @client.tree.command(name="playlistshow", description="Show saved playlists")
 async def playlistshow(interaction: discord.Interaction):
     pl = list(playlists_db.find())
     if not pl: return await interaction.response.send_message("No saved playlists.")
-    desc = "\n".join([f"**{p['_id']}** ({p['type'].upper()})" for p in pl])
+    desc = "\n".join([f"**{p['_id']}**" for p in pl])
     await interaction.response.send_message(embed=get_embed("💾 Saved Playlists", desc, COLOR_PINK))
 
 @client.tree.command(name="playlistdelete", description="Delete a saved playlist")
@@ -608,17 +533,13 @@ async def familytree(interaction: discord.Interaction):
 `Sxnity Hazakura` (Brother)
 
 **🌹 The Children**
-`Alec Hazakura`, `Aaron Hazakura`, `Kerry Hazakura`
-`Mono Hazakura`, `Super Hazakura`
+`Alec Hazakura`, `Aaron Hazakura`, `Kerry Hazakura`, `Mono Hazakura`, `Super Hazakura`
 
 **✨ The Grandchildren**
-`Cataria Hazakura` (Child of Alec)
-`Dexter Hazakura` (Child of Alec)
-`Mochi` (Child of Aaron)
+`Cataria Hazakura`, `Dexter Hazakura`, `Mochi`
 
 **🌙 Nieces, Nephews & Others**
-`Unknown` (Child of Karma)
-`Luriella` (Foster Child/Niece)
+`Unknown` (Child of Karma), `Luriella` (Foster Child/Niece)
 
 **⛓️ The Pet**
 `Ace Hazakura`
