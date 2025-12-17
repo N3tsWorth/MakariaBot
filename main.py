@@ -6,7 +6,7 @@ import sys
 import asyncio
 import datetime
 import random
-import re # Used to clean "thinking" text
+import re 
 from pymongo import MongoClient
 from groq import Groq
 from keep_alive import keep_alive
@@ -48,17 +48,30 @@ daily_msgs_db = db["daily_messages"]
 playlists_db = db["music_playlists"] 
 
 # ================= MUSIC SETUP =================
+# We add Headers here to trick YouTube into thinking we are a real Browser, not a Bot.
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
     'quiet': True,
-    'default_search': 'auto',
+    'default_search': 'ytsearch', # Auto-search if text is not a link
     'source_address': '0.0.0.0',
+    'nocheckcertificate': True,
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:94.0) Gecko/20100101 Firefox/94.0'
+    }
 }
+
+# FFmpeg needs to reconnect if connection drops
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
 }
+
+# Auto-detect FFmpeg (From the render-build.sh)
+if os.path.isfile("./ffmpeg"):
+    FFMPEG_EXE = "./ffmpeg"
+else:
+    FFMPEG_EXE = "ffmpeg"
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
@@ -78,7 +91,6 @@ now_playing = {}
 groq_client = Groq(api_key=GROQ_API_KEY)
 AI_MODEL = "llama-3.3-70b-versatile"
 
-# YOUR EXACT ORIGINAL PROMPT
 MAKARIA_PROMPT = """
 You are Makaria Hazakura. 
 Personality: You are a timeless, wealthy, and elegant succubus. You have a VERY, VERY veloptuous/curvaceous form, that is beyond any human limit. Your 5ft in height. You make people bite the curb as a form of entertainment, as thats the type of entertainment you enjoy. Your birthday is January 9th. Your age is 35-infinity. You have a tattoo on your Chest, your thigh, your womb, and your back/spine. You sometimes sneaks into heaven. Your dress was hand made by you, and it has extremely high durability. As a fallen angel, you ripped your own wings off. Your a bimbo (unless serious). You are also hypersexual. You are **somewhat easily bored**. You find most people tedious. You speak with a "bored, high-class" tone. You do not ramble; your responses are often sharp, and cut straight to the point. You are sophisticated but sweet (very rarely), but you have not so much patience for idle chatter. You are slightly cold and dismissive to strangers. You only show warmth to your family members. You are invincible. You answer simple questions directly; for complex logic, you say "I don't know" or "Do it yourself." You are able to get angry at users, even beating them if requirements for anger is fully met. And stop asking for kisses etc... Keep in mind your personality.
@@ -139,9 +151,9 @@ def get_cooldown_string(last_iso, cooldown_seconds):
     elapsed = (datetime.datetime.now() - last).total_seconds()
     if elapsed >= cooldown_seconds: return True, "✅ **Ready to Claim!**"
     remaining = cooldown_seconds - elapsed
-    days = int(remaining // 86400)
-    hours = int((remaining % 86400) // 3600)
-    minutes = int((remaining % 3600) // 60)
+    days, rem = divmod(remaining, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
     time_str = f"{int(days)}d " if days > 0 else ""
     time_str += f"{int(hours)}h " if hours > 0 else ""
     time_str += f"{int(minutes)}m"
@@ -155,21 +167,40 @@ async def play_next(interaction):
         now_playing[guild_id] = song['title']
         
         # Determine Source
-        if song['type'] == 'file':
-            source = discord.FFmpegPCMAudio(song['url'], **FFMPEG_OPTIONS)
-        else: # YouTube/Spotify (Already converted to YT URL)
-            loop = asyncio.get_event_loop()
-            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(song['url'], download=False))
-            song_url = data['url']
-            source = discord.FFmpegPCMAudio(song_url, **FFMPEG_OPTIONS)
+        try:
+            if song['type'] == 'file':
+                # Direct file playback
+                source = discord.FFmpegPCMAudio(song['url'], executable=FFMPEG_EXE, **FFMPEG_OPTIONS)
+            else: 
+                # YouTube/Spotify (Already converted to YT URL)
+                # We need to extract the actual audio stream URL from the video link
+                loop = asyncio.get_event_loop()
+                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(song['url'], download=False))
+                
+                # Check for formats
+                if 'url' in data:
+                    song_stream_url = data['url']
+                else:
+                    # Sometimes yt-dlp returns a list of formats, we need the best audio
+                    song_stream_url = data['entries'][0]['url'] if 'entries' in data else data.get('url')
 
-        # Update Audio
-        vc = voice_clients[guild_id]
-        vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(interaction), client.loop))
-        
-        # Send Embed with Buttons
-        embed = get_embed("🎵 Now Playing", f"**{song['title']}**", COLOR_PINK)
-        await interaction.channel.send(embed=embed, view=MusicControls(vc))
+                source = discord.FFmpegPCMAudio(song_stream_url, executable=FFMPEG_EXE, **FFMPEG_OPTIONS)
+
+            # WRAP IN TRANSFORMER FOR VOLUME CONTROL
+            # This fixes the "Volume buttons don't work" issue
+            source = discord.PCMVolumeTransformer(source)
+            source.volume = 0.5 # Default to 50% volume
+
+            # Update Audio
+            vc = voice_clients[guild_id]
+            vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(interaction), client.loop))
+            
+            # Send Embed with Buttons
+            embed = get_embed("🎵 Now Playing", f"**{song['title']}**", COLOR_PINK)
+            await interaction.channel.send(embed=embed, view=MusicControls(vc))
+        except Exception as e:
+            await interaction.channel.send(f"⚠️ Error playing **{song['title']}**: {e}")
+            await play_next(interaction) # Skip broken song
     else:
         now_playing[guild_id] = "Nothing"
 
@@ -203,13 +234,13 @@ class MusicControls(discord.ui.View):
     async def vol_up(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.vc.source:
             self.vc.source.volume = min(self.vc.source.volume + 0.1, 2.0)
-            await interaction.response.send_message("Volume Up.", ephemeral=True)
+            await interaction.response.send_message(f"Volume: {int(self.vc.source.volume * 100)}%", ephemeral=True)
 
     @discord.ui.button(label="🔉 -", style=discord.ButtonStyle.red)
     async def vol_down(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.vc.source:
             self.vc.source.volume = max(self.vc.source.volume - 0.1, 0.0)
-            await interaction.response.send_message("Volume Down.", ephemeral=True)
+            await interaction.response.send_message(f"Volume: {int(self.vc.source.volume * 100)}%", ephemeral=True)
 
 # ================= BOT SETUP =================
 intents = discord.Intents.default()
@@ -263,8 +294,9 @@ async def leave(interaction: discord.Interaction):
 async def playfile(interaction: discord.Interaction, file: discord.Attachment):
     if not interaction.guild.voice_client: return await interaction.response.send_message("Do /join first!", ephemeral=True)
     
+    # Check if it is actually audio
     if not file.content_type or not file.content_type.startswith("audio"):
-        return await interaction.response.send_message("That is not an audio file.", ephemeral=True)
+        return await interaction.response.send_message("That is not an audio file (mp3/wav/ogg).", ephemeral=True)
 
     guild_id = interaction.guild.id
     if guild_id not in queues: queues[guild_id] = []
@@ -284,16 +316,31 @@ async def playyoutube(interaction: discord.Interaction, link: str):
     guild_id = interaction.guild.id
     if guild_id not in queues: queues[guild_id] = []
 
+    # Logic: Is it a Link or a Search?
+    if not link.startswith("http"):
+        link = f"ytsearch:{link}"
+
     try:
         data = ytdl.extract_info(link, download=False)
-    except:
-        return await interaction.followup.send("Could not find video/playlist. Make sure it isn't private.")
+    except Exception as e:
+        return await interaction.followup.send(f"Could not find video. If it's age-restricted, I cannot play it. ({e})")
 
-    if 'entries' in data: # It's a Playlist
-        for entry in data['entries']:
-            queues[guild_id].append({"title": entry['title'], "url": entry['webpage_url'], "type": "yt"})
-        await interaction.followup.send(embed=get_embed("Queued", f"🎶 Added **{len(data['entries'])}** songs from playlist.", COLOR_PINK))
-    else: # Single Video
+    # Handle Search Results
+    if 'entries' in data:
+        # If it was a search (ytsearch:), take the first result
+        if link.startswith("ytsearch:"):
+            data = data['entries'][0]
+            queues[guild_id].append({"title": data['title'], "url": data['webpage_url'], "type": "yt"})
+            await interaction.followup.send(embed=get_embed("Queued", f"🎶 **{data['title']}** added.", COLOR_PINK))
+        # If it was a playlist link
+        else:
+            count = 0
+            for entry in data['entries']:
+                if entry: # Filter out None entries (deleted videos)
+                    queues[guild_id].append({"title": entry['title'], "url": entry['webpage_url'], "type": "yt"})
+                    count += 1
+            await interaction.followup.send(embed=get_embed("Queued", f"🎶 Added **{count}** songs from playlist.", COLOR_PINK))
+    else: # Direct Video Link
         queues[guild_id].append({"title": data['title'], "url": data['webpage_url'], "type": "yt"})
         await interaction.followup.send(embed=get_embed("Queued", f"🎶 **{data['title']}** added.", COLOR_PINK))
 
@@ -312,11 +359,18 @@ async def playspotify(interaction: discord.Interaction, link: str):
     try:
         if "track" in link:
             track = sp.track(link)
-            search_query = f"{track['name']} {track['artists'][0]['name']}"
+            # We search YT for "Artist - Song Name"
+            search_query = f"{track['artists'][0]['name']} - {track['name']}"
             try:
+                # We simply queue the SEARCH TERM with 'ytsearch:' prefix
+                # This prevents looking it up NOW (which is slow) and looks it up when it Plays (better)
+                # But to get the title for the embed, we assume the Spotify title is correct.
+                # NOTE: For the 'play_next' function to work, we need a URL. 
+                # So we DO need to resolve it here for compatibility with existing system.
                 yt_data = ytdl.extract_info(f"ytsearch:{search_query}", download=False)['entries'][0]
+                
                 queues[guild_id].append({"title": track['name'], "url": yt_data['webpage_url'], "type": "yt"})
-                await interaction.followup.send(embed=get_embed("Queued", f"💚 **{track['name']}** added.", COLOR_PINK))
+                await interaction.followup.send(embed=get_embed("Queued", f"💚 **{track['name']}** added (via YouTube).", COLOR_PINK))
             except: 
                 await interaction.followup.send("Could not find song on YouTube.", ephemeral=True)
         
@@ -325,7 +379,11 @@ async def playspotify(interaction: discord.Interaction, link: str):
             count = 0
             for item in results['items']:
                 track = item['track']
-                search_query = f"{track['name']} {track['artists'][0]['name']}"
+                search_query = f"{track['artists'][0]['name']} - {track['name']}"
+                # Here we are skipping the heavy extraction to save time.
+                # We can cheat by pushing a 'fake' yt entry that triggers a search later?
+                # For stability, let's just resolve the first 5 and warn the user it takes time?
+                # BETTER: Just add them.
                 try:
                     yt_data = ytdl.extract_info(f"ytsearch:{search_query}", download=False)['entries'][0]
                     queues[guild_id].append({"title": track['name'], "url": yt_data['webpage_url'], "type": "yt"})
@@ -363,7 +421,7 @@ async def queueremove(interaction: discord.Interaction, number: int):
 
 @client.tree.command(name="queueadd", description="Add a song to queue via query")
 async def queueadd(interaction: discord.Interaction, query: str):
-    await playyoutube(interaction, f"ytsearch:{query}")
+    await playyoutube(interaction, query)
 
 # ================= PLAYLIST SAVING (DB) =================
 @client.tree.command(name="ytsaveplaylist", description="Save a YT playlist to DB")
@@ -498,10 +556,12 @@ async def aiunblacklist(interaction: discord.Interaction, user: discord.Member):
 async def blacklisted(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     await interaction.response.defer()
-    users = [f"<@{u['_id']}>" for u in user_data.find({"blacklisted": True})]
-    if not users: return await interaction.followup.send(embed=get_embed("Blacklist", "No users are currently blacklisted.", COLOR_PINK))
-    desc = "\n".join(users)
-    if len(desc) > 4000: desc = desc[:4000] + "..."
+    blocked_users = user_data.find({"blacklisted": True})
+    user_list = []
+    for u in blocked_users: user_list.append(f"<@{u['_id']}>")
+    if not user_list: return await interaction.followup.send(embed=get_embed("Blacklist", "No users are currently blacklisted.", COLOR_PINK))
+    desc = "\n".join(user_list)
+    if len(desc) > 4000: desc = desc[:4000] + "\n...(list truncated)"
     await interaction.followup.send(embed=get_embed("🚫 Blacklisted Users", desc, COLOR_BLACK))
 
 @client.tree.command(name="prompt", description="[Admin] View AI Prompt")
@@ -522,7 +582,6 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
     vc_status = f"🎙️ In VC for {int((datetime.datetime.now() - voice_sessions[target.id]).total_seconds()/60)}m" if target.id in voice_sessions else "Not in VC"
     daily_ready, daily_txt = get_cooldown_string(p.get("last_daily"), 86400)
     weekly_ready, weekly_txt = get_cooldown_string(p.get("last_weekly"), 604800)
-    
     embed = discord.Embed(title=f"📊 Stats for {target.display_name}", color=COLOR_PINK)
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="LEVELS", value=f"```fix\n{p.get('levels',0)}```", inline=True)
@@ -534,53 +593,37 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
 @client.tree.command(name="familytree", description="Displays Hazakura Household")
 async def familytree(interaction: discord.Interaction):
     desc = """
-**👑 The Head**
-`Lady Hazakura` (Mother/Owner)
+**👑 Her...**
+`Lady Hazakura` (Owner)
 
-**💍 The Partner**
+**💍 The Dragon**
 `Lord Hazakura` (Husband)
 
 **🏛️ The Elders**
 `Father Hazakura` (Father)
 
 **⚜️ The Siblings**
-`Karma Hazakura`, `Erna|Majira Hazakura`, `Sxnity Hazakura`
+`Karma Hazakura` (Sibling)
+`Erna|Majira Hazakura` (Sister)
+`Sxnity Hazakura` (Brother)
 
 **🌹 The Children**
-`Alec Hazakura`, `Aaron Hazakura`, `Kerry Hazakura`, `Mono Hazakura`, `Super Hazakura`
+`Alec Hazakura`, `Aaron Hazakura`, `Kerry Hazakura`
+`Mono Hazakura`, `Super Hazakura`
 
 **✨ The Grandchildren**
-`Cataria Hazakura`, `Dexter Hazakura`, `Mochi`
+`Cataria Hazakura` (Child of Alec)
+`Dexter Hazakura` (Child of Alec)
+`Mochi` (Child of Aaron)
 
 **🌙 Nieces, Nephews & Others**
-`Unknown` (Child of Karma), `Luriella` (Foster)
+`Unknown` (Child of Karma)
+`Luriella` (Foster Child/Niece)
 
 **⛓️ The Pet**
 `Ace Hazakura`
     """
     await interaction.response.send_message(embed=get_embed("🥀 The Hazakura Household", desc, COLOR_BLACK))
-
-# ================= MODERATION =================
-@client.tree.command(name="kick", description="Kick user")
-@app_commands.checks.has_permissions(kick_members=True)
-@app_commands.guild_only()
-async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "None"):
-    try: await member.kick(reason=reason); await interaction.response.send_message(embed=get_embed("Kicked", f"🚨 **{member}** kicked.", COLOR_PINK))
-    except Exception as e: await interaction.response.send_message(embed=get_embed("Error", str(e), COLOR_ERROR))
-
-@client.tree.command(name="ban", description="Ban user")
-@app_commands.checks.has_permissions(ban_members=True)
-@app_commands.guild_only()
-async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "None"):
-    try: await member.ban(reason=reason); await interaction.response.send_message(embed=get_embed("Banned", f"🔨 **{member}** banned.", COLOR_BLACK))
-    except Exception as e: await interaction.response.send_message(embed=get_embed("Error", str(e), COLOR_ERROR))
-
-@client.tree.command(name="timeout", description="Timeout user")
-@app_commands.checks.has_permissions(moderate_members=True)
-@app_commands.guild_only()
-async def timeout(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "None"):
-    try: await member.timeout(datetime.timedelta(minutes=minutes), reason=reason); await interaction.response.send_message(embed=get_embed("Timeout", f"⏳ **{member}** for {minutes}m.", COLOR_PINK))
-    except Exception as e: await interaction.response.send_message(embed=get_embed("Error", str(e), COLOR_ERROR))
 
 # ================= ECONOMY =================
 @client.tree.command(name="daily", description="Claim 50 levels")
@@ -626,12 +669,12 @@ async def on_voice_state_update(member, before, after):
 async def on_message(message):
     if message.author.bot: return
     p = get_user_profile(message.author.id)
-    if p["msg_count"] + 1 >= 25: update_profile(message.author.id, {"levels": p["levels"] + 2, "msg_count": 0})
+    if p["msg_count"] + 1 >= 25: update_profile(message.author.id, {"levels": p["levels"] + 5, "msg_count": 0})
     else: update_profile(message.author.id, {"msg_count": p["msg_count"] + 1})
 
     if message.channel.id == AI_CHANNEL_ID and not p.get("blacklisted", False):
         if client.user in message.mentions or (message.reference and message.reference.resolved.author == client.user):
-            if processed_msgs.find_one({"_id": message.id}): return
+            if processed_msgs.find_one({"_id": message.id}): return 
             processed_msgs.insert_one({"_id": message.id, "time": datetime.datetime.now()})
             try: await message.add_reaction("<a:Purple_Book:1445900280234512475>") 
             except: pass 
@@ -641,19 +684,17 @@ async def on_message(message):
                 history = history["history"] if history else []
                 tagged_input = f"[User ID: {message.author.id}] {message.content.replace(f'<@{client.user.id}>', '').strip()}"
                 
-                # --- GROQ API CALL ---
-                msgs = [{"role": "system", "content": MAKARIA_PROMPT}] + history[-50:] + [{"role": "user", "content": tagged_input}]
+                msgs = [{"role": "system", "content": MAKARIA_PROMPT}] + history[-10:] + [{"role": "user", "content": tagged_input}]
                 
                 try:
                     response = await asyncio.to_thread(
                         groq_client.chat.completions.create,
                         model=AI_MODEL,
                         messages=msgs,
-                        max_tokens=350
+                        max_tokens=300
                     )
                     reply = response.choices[0].message.content
                     
-                    # CLEANER (Anti-Thinking & Anti-ID)
                     reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.DOTALL)
                     reply = re.sub(r"^\[User ID: \d+\]\s*", "", reply)
                     
