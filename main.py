@@ -6,7 +6,7 @@ import sys
 import asyncio
 import datetime
 import random
-import re # Used to clean "thinking" text
+import re 
 from pymongo import MongoClient
 from groq import Groq
 from keep_alive import keep_alive
@@ -23,6 +23,16 @@ DAILY_CHANNEL_ID = 1441656873601466378
 # Permissions
 ALLOWED_ROLES = [1271569854452990002, 1039588309313278102]
 
+# Family IDs (Immune to Banishment)
+FAMILY_IDS = [
+    468914594665070622, 903802356582481930, 703290982761758760,
+    663301390302576640, 1371690348522242159, 1444063874910523526,
+    529424214550118400, 1237129159269027871, 768819665291444225,
+    353322621154361346, 568547494158401586, 724416116704673892,
+    697919853847380128, 691576709006229504, 1291469833564590155,
+    804527969640513556, 1227008645489889330
+]
+
 # Colors
 COLOR_PINK = discord.Color.from_rgb(255, 20, 147)
 COLOR_BLACK = discord.Color.from_rgb(10, 10, 10)
@@ -38,9 +48,9 @@ user_data = db["users"]
 ai_memory = db["ai_memory"]
 processed_msgs = db["processed_messages"] 
 daily_msgs_db = db["daily_messages"]
+user_specific_memory = db["user_specific_memory"] # NEW: Stores names/facts
 
 # ================= AI CONFIGURATION (GROQ) =================
-# Llama 3 on Groq is fast, free, and smart.
 groq_client = Groq(api_key=GROQ_API_KEY)
 AI_MODEL = "llama-3.3-70b-versatile"
 
@@ -73,6 +83,12 @@ CRITICAL INSTRUCTIONS:
 2. **NEVER** include the "[User ID: X]" tag in your own reply. 
 3. **NO INTERNAL THOUGHTS:** Do not output reasoning like "I will treat him this way because...". Do not use <think> tags. Output ONLY your spoken response and actions.
 4. Be concise. Do not write long paragraphs.
+
+NEW SYSTEMS (MEMORY & BANISHMENT):
+1. **Variety:** Do NOT just drink tea or play piano. You engage in other activities: Tending to Spider Lilies, sharpening origami paper into blades, gazing at the moon, critiquing the garden layout, organizing jewelry, or just sleeping.
+2. **Learning:** If a user tells you their name or a fact, or you learn something about them, add this tag to the end of your message: [REMEMBER: {fact}]. Example: "[REMEMBER: Name is John]" or "[REMEMBER: He hates spiders]".
+3. **Banishment:** If a user (Who is NOT in the Hazakura Family list) angers you to the point of 0 tolerance, you can banish them. Output the tag [BANISH] at the start of your message. Say something like "You are banished from my garden!". If they return later (unblacklisted), act confused and annoyed.
+4. **Bond:** Refer to the "System Data" provided in the chat for the user's bond level and known facts. Higher bond = higher tolerance.
 """
 
 # ================= HELPER FUNCTIONS =================
@@ -190,12 +206,19 @@ async def setlevels(interaction: discord.Interaction, user: discord.Member, amou
     update_profile(user.id, {"levels": amount})
     await interaction.response.send_message(embed=get_embed("Levels Set", f"Set {user.mention} to **{amount}**."))
 
-@client.tree.command(name="destroymemory", description="[Admin] Wipe AI memory")
+@client.tree.command(name="destroymemory", description="[Admin] Wipe AI message history")
 @app_commands.guild_only()
 async def destroymemory(interaction: discord.Interaction):
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     ai_memory.delete_one({"_id": str(AI_CHANNEL_ID)})
-    await interaction.response.send_message("Memory shattered.")
+    await interaction.response.send_message("Message history shattered.")
+
+@client.tree.command(name="destroyusermemory", description="[Admin] Wipe a specific user's fact memory")
+@app_commands.guild_only()
+async def destroyusermemory(interaction: discord.Interaction, user: discord.Member):
+    if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
+    user_specific_memory.delete_one({"_id": str(user.id)})
+    await interaction.response.send_message(embed=get_embed("Memory Wiped", f"Makaria has forgotten everything about **{user.display_name}** (facts/names).", COLOR_BLACK))
 
 @client.tree.command(name="aiblacklist", description="[Admin] Block user")
 @app_commands.guild_only()
@@ -238,7 +261,12 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
     await interaction.response.defer()
     target = user or interaction.user
     p = get_user_profile(target.id)
-    # VC Status updated to remove music context
+    
+    # Get User Memory data for stats
+    mem = user_specific_memory.find_one({"_id": str(target.id)})
+    bond = mem.get("bond", 0) if mem else 0
+    facts_count = len(mem.get("facts", [])) if mem else 0
+
     vc_status = "Not in VC"
     if target.voice and target.voice.channel:
         if target.id in voice_sessions:
@@ -252,6 +280,7 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="LEVELS", value=f"```fix\n{p.get('levels',0)}```", inline=True)
     embed.add_field(name="AI CHATS", value=f"```fix\n{p.get('ai_interactions',0)}```", inline=True)
+    embed.add_field(name="RELATIONSHIP", value=f"❤️ Bond: **{bond}**\n🧠 Facts Known: **{facts_count}**", inline=True)
     embed.add_field(name="PASSIVE", value=f"💬 Msgs: **{p.get('msg_count',0)}/25**\n{vc_status}", inline=False)
     embed.add_field(name="COOLDOWNS", value=f"📅 Daily: {daily_txt}\n📆 Weekly: {weekly_txt}", inline=False)
     await interaction.followup.send(embed=embed)
@@ -310,8 +339,6 @@ async def timeout(interaction: discord.Interaction, member: discord.Member, minu
     except Exception as e: await interaction.response.send_message(embed=get_embed("Error", str(e), COLOR_ERROR))
 
 # ================= ECONOMY =================
-# Removed /levels command as requested
-
 @client.tree.command(name="daily", description="Claim 50 levels")
 @app_commands.guild_only()
 async def daily(interaction: discord.Interaction):
@@ -368,10 +395,24 @@ async def on_message(message):
             async with message.channel.typing():
                 history = ai_memory.find_one({"_id": str(message.channel.id)})
                 history = history["history"] if history else []
-                tagged_input = f"[User ID: {message.author.id}] {message.content.replace(f'<@{client.user.id}>', '').strip()}"
+                raw_input = message.content.replace(f'<@{client.user.id}>', '').strip()
+                tagged_input = f"[User ID: {message.author.id}] {raw_input}"
+                
+                # --- MEMORY INJECTION ---
+                # Retrieve specific user memory
+                user_mem = user_specific_memory.find_one({"_id": str(message.author.id)})
+                
+                # Default values
+                known_facts = user_mem.get("facts", []) if user_mem else []
+                bond_level = user_mem.get("bond", 0) if user_mem else 0
+                
+                # Build context string
+                system_context = f"[System Data: User Bond Level: {bond_level}. Known Facts: {', '.join(known_facts)}]"
                 
                 # --- GROQ API CALL ---
-                msgs = [{"role": "system", "content": MAKARIA_PROMPT}] + history[-50:] + [{"role": "user", "content": tagged_input}]
+                msgs = [{"role": "system", "content": MAKARIA_PROMPT}] + history[-50:] + \
+                       [{"role": "system", "content": system_context}] + \
+                       [{"role": "user", "content": tagged_input}]
                 
                 try:
                     response = await asyncio.to_thread(
@@ -382,14 +423,39 @@ async def on_message(message):
                     )
                     reply = response.choices[0].message.content
                     
-                    # CLEANER (Anti-Thinking & Anti-ID)
+                    # --- AUTO-LEARNING LOGIC ---
+                    # Look for [REMEMBER: ...] tags
+                    memories = re.findall(r"\[REMEMBER: (.*?)\]", reply)
+                    for fact in memories:
+                        user_specific_memory.update_one(
+                            {"_id": str(message.author.id)},
+                            {"$addToSet": {"facts": fact}, "$inc": {"bond": 1}}, # Learning increases bond
+                            upsert=True
+                        )
+                    
+                    # --- DYNAMIC BANISHMENT LOGIC ---
+                    # Look for [BANISH] tag
+                    if "[BANISH]" in reply:
+                        if message.author.id not in FAMILY_IDS:
+                            update_profile(message.author.id, {"blacklisted": True})
+                            # Bond decreases significantly on ban
+                            user_specific_memory.update_one({"_id": str(message.author.id)}, {"$inc": {"bond": -50}}, upsert=True)
+                        else:
+                            # If family, ignore banish tag in logic (she can say it, but it won't work)
+                            pass
+
+                    # --- CLEANER ---
                     reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.DOTALL)
                     reply = re.sub(r"^\[User ID: \d+\]\s*", "", reply)
+                    reply = re.sub(r"\[REMEMBER: .*?\]", "", reply) # Hide memory tag from chat
+                    reply = re.sub(r"\[BANISH\]", "", reply) # Hide banish tag from chat
                     
-                    await message.reply(reply)
-                    history.extend([{"role": "user", "content": tagged_input}, {"role": "assistant", "content": reply}])
-                    ai_memory.update_one({"_id": str(message.channel.id)}, {"$set": {"history": history[-20:]}}, upsert=True)
-                    update_profile(message.author.id, {"ai_interactions": p["ai_interactions"] + 1})
+                    if reply.strip():
+                        await message.reply(reply)
+                        history.extend([{"role": "user", "content": tagged_input}, {"role": "assistant", "content": reply}])
+                        ai_memory.update_one({"_id": str(message.channel.id)}, {"$set": {"history": history[-20:]}}, upsert=True)
+                        update_profile(message.author.id, {"ai_interactions": p["ai_interactions"] + 1})
+                
                 except Exception as e: await message.reply(f"*[Error: {e}]*")
 
 # Socials View
@@ -423,5 +489,3 @@ async def daily_task():
 
 keep_alive()
 client.run(DISCORD_TOKEN)
-
-
