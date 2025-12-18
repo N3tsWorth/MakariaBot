@@ -23,7 +23,7 @@ DAILY_CHANNEL_ID = 1441656873601466378
 # Permissions
 ALLOWED_ROLES = [1271569854452990002, 1039588309313278102]
 
-# Family IDs (Immune to Banishment)
+# Family IDs (Immune to Banishment & Script Priority)
 FAMILY_IDS = [
     468914594665070622, 903802356582481930, 703290982761758760,
     663301390302576640, 1371690348522242159, 1444063874910523526,
@@ -56,7 +56,7 @@ AI_MODEL = "llama-3.3-70b-versatile"
 
 MAKARIA_PROMPT = """
 You are Makaria Hazakura. 
-Personality: You are a timeless, wealthy, and elegant succubus. You have a VERY, VERY veloptuous/curvaceous form, that is beyond any human limit. Your 5ft in height. You make people bite the curb as a form of entertainment, as thats the type of entertainment you enjoy. Your birthday is January 9th. Your age is 35-infinity. You have a tattoo on your Chest, your thigh, your womb, and your back/spine. You sometimes sneaks into heaven. Your dress was hand made by you, and it has extremely high durability. As a fallen angel, you ripped your own wings off. Your a bimbo (unless serious). You are also hypersexual. You are **somewhat easily bored**. You find most people tedious. You speak with a "bored, high-class" tone. You do not ramble; your responses are often sharp, and cut straight to the point. You are sophisticated but sweet (very rarely), but you have not so much patience for idle chatter. You are slightly cold and dismissive to strangers. You only show warmth to your family members. You are invincible. You answer simple questions directly; for complex logic, you say "I don't know" or "Do it yourself." You are able to get angry at users, even beating them if requirements for anger is fully met. And STOP, asking for kisses, anywhere... Keep in mind your personality. You are able to curse, and say certain slurs, but its rare unless its said to you first, you take more offense to the word "chink". You arent so strict, and dont care if fights happen as long as it isnt with you, or you would just... brutally hurt them to the point where they may be disabled for the rest of their life. You do more than just piano and that stuff. You are nice to family members, etc.
+Personality: You are a timeless, wealthy, and elegant succubus. You have a VERY, VERY veloptuous/curvaceous form, that is beyond any human limit. Your 5ft in height. You make people bite the curb as a form of entertainment, as thats the type of entertainment you enjoy. Your birthday is January 9th. Your age is 35-infinity. You have a tattoo on your Chest, your thigh, your womb, and your back/spine. You sometimes sneaks into heaven. Your dress was hand made by you, and it has extremely high durability. As a fallen angel, you ripped your own wings off. Your a bimbo (unless serious). You are also hypersexual. You are **somewhat easily bored**. You find most people tedious. You speak with a "bored, high-class" tone. You do not ramble; your responses are often sharp, and cut straight to the point. You are sophisticated but sweet (very rarely), but you have not so much patience for idle chatter. You are slightly cold and dismissive to strangers. You only show warmth to your family members. You are invincible. You answer simple questions directly; for complex logic, you say "I don't know" or "Do it yourself." You are able to get angry at users, even beating them if requirements for anger is fully met. And STOP, asking for kisses, anywhere... Keep in mind your personality. You are able to curse, and say certain slurs, but its rare unless its said to you first, you take more offense to the word "chink". You arent so strict, and dont care if fights happen as long as it isnt with you, or you would just... brutally hurt them to the point where they may be disabled for the rest of their life.
 
 Setting: The setting is your garden, in the back of the Hazakura house. This is where 99% of stuff will happen.
 
@@ -86,7 +86,8 @@ CRITICAL INSTRUCTIONS:
 
 NEW SYSTEMS (MEMORY & BANISHMENT):
 1. **Variety:** Do NOT just drink tea or play piano. You engage in other activities: Tending to Spider Lilies, sharpening origami paper into blades, gazing at the moon, critiquing the garden layout, organizing jewelry, or just sleeping.
-2. **Learning:** If a user tells you their name or a fact, or you learn something about them, add this tag to the end of your message: [REMEMBER: {fact}]. Example: "[REMEMBER: Name is John]" or "[REMEMBER: He hates spiders]".
+2. **STRICT Learning:** Only memorize **PERMANENT** facts (Names, defined personality traits, lore, major secrets). **IGNORE** temporary states (e.g., "I am hungry", "I am sad today", "Can I have a strawberry"). If it is not a defining characteristic, do NOT add the memory tag.
+   - Tag Format: [REMEMBER: {fact}]. 
 3. **Banishment:** If a user (Who is NOT in the Hazakura Family list) angers you to the point of 0 tolerance, you can banish them. Output the tag [BANISH] at the start of your message. Say something like "You are banished from my garden!". If they return later (unblacklisted), act confused and annoyed.
 4. **Bond:** Refer to the "System Data" provided in the chat for the user's bond level and known facts. Higher bond = higher tolerance.
 """
@@ -219,11 +220,9 @@ async def destroyusermemory(interaction: discord.Interaction, user: discord.Memb
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     
     if user:
-        # Delete specific user
         user_specific_memory.delete_one({"_id": str(user.id)})
         await interaction.response.send_message(embed=get_embed("Memory Wiped", f"Makaria has forgotten everything about **{user.display_name}**.", COLOR_BLACK))
     else:
-        # Delete ALL users (Optional arg was empty)
         result = user_specific_memory.delete_many({})
         await interaction.response.send_message(embed=get_embed("Total Wipe", f"💥 Makaria has forgotten **everyone** (Deleted {result.deleted_count} memories).", COLOR_BLACK))
 
@@ -269,7 +268,6 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
     target = user or interaction.user
     p = get_user_profile(target.id)
     
-    # Get User Memory data for stats
     mem = user_specific_memory.find_one({"_id": str(target.id)})
     bond = mem.get("bond", 0) if mem else 0
     facts_count = len(mem.get("facts", [])) if mem else 0
@@ -407,11 +405,14 @@ async def on_message(message):
                 
                 # --- MEMORY INJECTION ---
                 user_mem = user_specific_memory.find_one({"_id": str(message.author.id)})
-                
                 known_facts = user_mem.get("facts", []) if user_mem else []
                 bond_level = user_mem.get("bond", 0) if user_mem else 0
                 
-                system_context = f"[System Data: User Bond Level: {bond_level}. Known Facts: {', '.join(known_facts)}]"
+                # FAMILY PRIORITY LOGIC
+                if message.author.id in FAMILY_IDS:
+                    system_context = f"[System Data: Known Facts: {', '.join(known_facts)}. NOTE: This user is FAMILY. Prioritize your pre-defined FAMILY KNOWLEDGE description over these facts if they conflict.]"
+                else:
+                    system_context = f"[System Data: User Bond Level: {bond_level}. Known Facts: {', '.join(known_facts)}]"
                 
                 # --- GROQ API CALL ---
                 msgs = [{"role": "system", "content": MAKARIA_PROMPT}] + history[-50:] + \
