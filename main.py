@@ -19,6 +19,11 @@ MONGO_URL = os.getenv("MONGO_URL")
 # Channels
 AI_CHANNEL_ID = 1449873892767174719
 DAILY_CHANNEL_ID = 1441656873601466378
+LOG_CHANNEL_ID = 1452306991698677871 # NEW: Log Channel
+
+# Owner Config (For Logs)
+OWNER_ID = 768819665291444225
+dm_logging_enabled = True # Default state
 
 # Permissions
 ALLOWED_ROLES = [1271569854452990002, 1039588309313278102]
@@ -137,6 +142,32 @@ def get_cooldown_string(last_iso, cooldown_seconds):
     time_str += f"{int(minutes)}m"
     return False, f"⏳ **{time_str}** remaining"
 
+# ================= LOGGER FUNCTION =================
+async def log_command_usage(interaction: discord.Interaction, command_name: str, details: str = "None"):
+    # 1. Send to Log Channel
+    log_channel = interaction.client.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        embed = discord.Embed(title="📜 Command Executed", color=discord.Color.purple())
+        embed.add_field(name="User", value=f"{interaction.user.name} (`{interaction.user.id}`)", inline=False)
+        embed.add_field(name="Command", value=f"`{command_name}`", inline=True)
+        embed.add_field(name="Details", value=details, inline=True)
+        embed.add_field(name="Channel", value=interaction.channel.mention if interaction.channel else "DM", inline=False)
+        embed.timestamp = datetime.datetime.now()
+        await log_channel.send(embed=embed)
+
+    # 2. DM Owner (If enabled)
+    global dm_logging_enabled
+    if dm_logging_enabled:
+        owner = interaction.client.get_user(OWNER_ID)
+        if not owner: 
+            try: owner = await interaction.client.fetch_user(OWNER_ID)
+            except: pass
+        
+        if owner:
+            try:
+                await owner.send(f"**[LOG]** `{command_name}` used by **{interaction.user.name}** in {interaction.channel.name if interaction.channel else 'DM'}.\nDetails: {details}")
+            except: pass
+
 # ================= BOT SETUP =================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -155,10 +186,22 @@ class MyBot(discord.Client):
 
 client = MyBot()
 
+# ================= SECRET TOGGLE COMMAND =================
+@client.tree.command(name="supersecretcommand", description="Toggle DM logging")
+async def supersecretcommand(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("?", ephemeral=True)
+    
+    global dm_logging_enabled
+    dm_logging_enabled = not dm_logging_enabled
+    state = "ENABLED" if dm_logging_enabled else "DISABLED"
+    await interaction.response.send_message(embed=get_embed("System", f"🕵️ DM Logging is now **{state}**.", COLOR_BLACK), ephemeral=True)
+
 # ================= DAILY MESSAGE MANAGEMENT =================
 @client.tree.command(name="adddailymessage", description="[Admin] Add a new daily message")
 @app_commands.guild_only()
 async def adddailymessage(interaction: discord.Interaction, codename: str, message: str):
+    await log_command_usage(interaction, "/adddailymessage", f"Code: {codename}")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     if daily_msgs_db.find_one({"_id": codename}): return await interaction.response.send_message(embed=get_embed("Error", "Codename exists.", COLOR_ERROR), ephemeral=True)
     daily_msgs_db.insert_one({"_id": codename, "content": message, "used": False})
@@ -167,6 +210,7 @@ async def adddailymessage(interaction: discord.Interaction, codename: str, messa
 @client.tree.command(name="removedailymessage", description="[Admin] Remove a daily message")
 @app_commands.guild_only()
 async def removedailymessage(interaction: discord.Interaction, codename: str):
+    await log_command_usage(interaction, "/removedailymessage", f"Code: {codename}")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     if daily_msgs_db.delete_one({"_id": codename}).deleted_count > 0:
         await interaction.response.send_message(embed=get_embed("Success", f"🗑️ Deleted: `{codename}`", COLOR_BLACK))
@@ -175,6 +219,7 @@ async def removedailymessage(interaction: discord.Interaction, codename: str):
 @client.tree.command(name="editdailymessage", description="[Admin] Edit daily message")
 @app_commands.guild_only()
 async def editdailymessage(interaction: discord.Interaction, codename: str, new_message: str):
+    await log_command_usage(interaction, "/editdailymessage", f"Code: {codename}")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     if daily_msgs_db.update_one({"_id": codename}, {"$set": {"content": new_message}}).matched_count > 0:
         await interaction.response.send_message(embed=get_embed("Success", f"✏️ Updated: `{codename}`", COLOR_PINK))
@@ -183,6 +228,7 @@ async def editdailymessage(interaction: discord.Interaction, codename: str, new_
 @client.tree.command(name="viewdailymessages", description="[Admin] View all messages")
 @app_commands.guild_only()
 async def viewdailymessages(interaction: discord.Interaction):
+    await log_command_usage(interaction, "/viewdailymessages")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     await interaction.response.defer()
     msgs = list(daily_msgs_db.find())
@@ -195,6 +241,7 @@ async def viewdailymessages(interaction: discord.Interaction):
 @client.tree.command(name="addlevels", description="[Admin] Add levels")
 @app_commands.guild_only()
 async def addlevels(interaction: discord.Interaction, user: discord.Member, amount: int):
+    await log_command_usage(interaction, "/addlevels", f"Target: {user.name}, Amount: {amount}")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     p = get_user_profile(user.id)
     update_profile(user.id, {"levels": p["levels"] + amount})
@@ -203,6 +250,7 @@ async def addlevels(interaction: discord.Interaction, user: discord.Member, amou
 @client.tree.command(name="removelevels", description="[Admin] Remove levels")
 @app_commands.guild_only()
 async def removelevels(interaction: discord.Interaction, user: discord.Member, amount: int):
+    await log_command_usage(interaction, "/removelevels", f"Target: {user.name}, Amount: {amount}")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     p = get_user_profile(user.id)
     update_profile(user.id, {"levels": max(0, p["levels"] - amount)})
@@ -211,6 +259,7 @@ async def removelevels(interaction: discord.Interaction, user: discord.Member, a
 @client.tree.command(name="setlevels", description="[Admin] Set levels")
 @app_commands.guild_only()
 async def setlevels(interaction: discord.Interaction, user: discord.Member, amount: int):
+    await log_command_usage(interaction, "/setlevels", f"Target: {user.name}, Amount: {amount}")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     update_profile(user.id, {"levels": amount})
     await interaction.response.send_message(embed=get_embed("Levels Set", f"Set {user.mention} to **{amount}**."))
@@ -218,6 +267,7 @@ async def setlevels(interaction: discord.Interaction, user: discord.Member, amou
 @client.tree.command(name="destroymemory", description="[Admin] Wipe AI message history")
 @app_commands.guild_only()
 async def destroymemory(interaction: discord.Interaction):
+    await log_command_usage(interaction, "/destroymemory")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     ai_memory.delete_one({"_id": str(AI_CHANNEL_ID)})
     await interaction.response.send_message("Message history shattered.")
@@ -225,18 +275,21 @@ async def destroymemory(interaction: discord.Interaction):
 @client.tree.command(name="destroyusermemory", description="[Admin] Wipe user fact memory (Leave empty for ALL users)")
 @app_commands.guild_only()
 async def destroyusermemory(interaction: discord.Interaction, user: discord.Member = None):
+    await log_command_usage(interaction, "/destroyusermemory", f"Target: {user.name if user else 'ALL'}")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     
+    await interaction.response.defer()
     if user:
         user_specific_memory.delete_one({"_id": str(user.id)})
-        await interaction.response.send_message(embed=get_embed("Memory Wiped", f"Makaria has forgotten everything about **{user.display_name}**.", COLOR_BLACK))
+        await interaction.followup.send(embed=get_embed("Memory Wiped", f"Makaria has forgotten everything about **{user.display_name}**.", COLOR_BLACK))
     else:
         result = user_specific_memory.delete_many({})
-        await interaction.response.send_message(embed=get_embed("Total Wipe", f"💥 Makaria has forgotten **everyone** (Deleted {result.deleted_count} memories).", COLOR_BLACK))
+        await interaction.followup.send(embed=get_embed("Total Wipe", f"💥 Makaria has forgotten **everyone** (Deleted {result.deleted_count} memories).", COLOR_BLACK))
 
 @client.tree.command(name="aiblacklist", description="[Admin] Block user")
 @app_commands.guild_only()
 async def aiblacklist(interaction: discord.Interaction, user: discord.Member):
+    await log_command_usage(interaction, "/aiblacklist", f"Target: {user.name}")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     if get_user_profile(user.id).get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Info", "User already blacklisted.", COLOR_BLACK), ephemeral=True)
     update_profile(user.id, {"blacklisted": True})
@@ -245,6 +298,7 @@ async def aiblacklist(interaction: discord.Interaction, user: discord.Member):
 @client.tree.command(name="aiunblacklist", description="[Admin] Unblock user")
 @app_commands.guild_only()
 async def aiunblacklist(interaction: discord.Interaction, user: discord.Member):
+    await log_command_usage(interaction, "/aiunblacklist", f"Target: {user.name}")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     if not get_user_profile(user.id).get("blacklisted", False): return await interaction.response.send_message(embed=get_embed("Info", "User is not blacklisted.", COLOR_PINK), ephemeral=True)
     update_profile(user.id, {"blacklisted": False})
@@ -253,6 +307,7 @@ async def aiunblacklist(interaction: discord.Interaction, user: discord.Member):
 @client.tree.command(name="blacklisted", description="[Admin] List blocked users")
 @app_commands.guild_only()
 async def blacklisted(interaction: discord.Interaction):
+    await log_command_usage(interaction, "/blacklisted")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     await interaction.response.defer()
     users = [f"<@{u['_id']}>" for u in user_data.find({"blacklisted": True})]
@@ -264,6 +319,7 @@ async def blacklisted(interaction: discord.Interaction):
 @client.tree.command(name="prompt", description="[Admin] View Prompt")
 @app_commands.guild_only()
 async def view_prompt(interaction: discord.Interaction):
+    await log_command_usage(interaction, "/prompt")
     if not is_authorized(interaction): return await interaction.response.send_message(embed=get_embed("Error", "No Permission.", COLOR_ERROR), ephemeral=True)
     await interaction.response.send_message("**System Prompt:**")
     for i in range(0, len(MAKARIA_PROMPT), 1900): await interaction.channel.send(f"```text\n{MAKARIA_PROMPT[i:i+1900]}\n```")
@@ -272,6 +328,7 @@ async def view_prompt(interaction: discord.Interaction):
 @client.tree.command(name="stats", description="View stats")
 @app_commands.guild_only()
 async def stats(interaction: discord.Interaction, user: discord.Member = None):
+    await log_command_usage(interaction, "/stats", f"Target: {user.name if user else 'Self'}")
     await interaction.response.defer()
     target = user or interaction.user
     p = get_user_profile(target.id)
@@ -300,6 +357,7 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
 
 @client.tree.command(name="familytree", description="Displays Hazakura Household")
 async def familytree(interaction: discord.Interaction):
+    await log_command_usage(interaction, "/familytree")
     desc = """
 **👑 Her...**
 `Lady Hazakura` (Owner)
@@ -334,6 +392,7 @@ async def familytree(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(kick_members=True)
 @app_commands.guild_only()
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "None"):
+    await log_command_usage(interaction, "/kick", f"Target: {member.name}")
     try: await member.kick(reason=reason); await interaction.response.send_message(embed=get_embed("Kicked", f"🚨 **{member}** kicked.", COLOR_PINK))
     except Exception as e: await interaction.response.send_message(embed=get_embed("Error", str(e), COLOR_ERROR))
 
@@ -341,6 +400,7 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
 @app_commands.checks.has_permissions(ban_members=True)
 @app_commands.guild_only()
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "None"):
+    await log_command_usage(interaction, "/ban", f"Target: {member.name}")
     try: await member.ban(reason=reason); await interaction.response.send_message(embed=get_embed("Banned", f"🔨 **{member}** banned.", COLOR_BLACK))
     except Exception as e: await interaction.response.send_message(embed=get_embed("Error", str(e), COLOR_ERROR))
 
@@ -348,6 +408,7 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
 @app_commands.checks.has_permissions(moderate_members=True)
 @app_commands.guild_only()
 async def timeout(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "None"):
+    await log_command_usage(interaction, "/timeout", f"Target: {member.name}, Time: {minutes}m")
     try: await member.timeout(datetime.timedelta(minutes=minutes), reason=reason); await interaction.response.send_message(embed=get_embed("Timeout", f"⏳ **{member}** for {minutes}m.", COLOR_PINK))
     except Exception as e: await interaction.response.send_message(embed=get_embed("Error", str(e), COLOR_ERROR))
 
@@ -355,6 +416,7 @@ async def timeout(interaction: discord.Interaction, member: discord.Member, minu
 @client.tree.command(name="daily", description="Claim 50 levels")
 @app_commands.guild_only()
 async def daily(interaction: discord.Interaction):
+    await log_command_usage(interaction, "/daily")
     uid = str(interaction.user.id)
     p = get_user_profile(uid)
     ready, txt = get_cooldown_string(p.get("last_daily"), 86400)
@@ -365,6 +427,7 @@ async def daily(interaction: discord.Interaction):
 @client.tree.command(name="weekly", description="Claim 100 levels")
 @app_commands.guild_only()
 async def weekly(interaction: discord.Interaction):
+    await log_command_usage(interaction, "/weekly")
     uid = str(interaction.user.id)
     p = get_user_profile(uid)
     ready, txt = get_cooldown_string(p.get("last_weekly"), 604800)
@@ -375,6 +438,7 @@ async def weekly(interaction: discord.Interaction):
 @client.tree.command(name="leaderboard", description="Top 10")
 @app_commands.guild_only()
 async def leaderboard(interaction: discord.Interaction):
+    await log_command_usage(interaction, "/leaderboard")
     await interaction.response.defer() 
     top = user_data.find().sort("levels", -1).limit(10)
     desc = "\n".join([f"**{i}.** <@{u['_id']}> : `{u['levels']}`" for i, u in enumerate(top, 1)])
@@ -478,6 +542,7 @@ class SocialButtons(discord.ui.View):
 
 @client.tree.command(name="socials", description="Sends Milkii's socials")
 async def socials(interaction: discord.Interaction):
+    await log_command_usage(interaction, "/socials")
     embed = discord.Embed(description="✦･ﾟ: *✧･ﾟ:* **MILKII’S SOCIALS** *:･ﾟ✧*:･ﾟ✦\n━━━━━━━━━━━━━━━━━━━━\nWhat Would You Like To See, Darling?\n━━━━━━━━━━━━━━━━━━━━\n", color=COLOR_PINK)
     embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1037150853775237121/1441703047163281408/image.png")
     embed.set_footer(text="My Garden Welcomes You...", icon_url="https://cdn.discordapp.com/attachments/1039430532779495459/1375313060754882660/SPOILER_Untitled595_20250522232107.png")
